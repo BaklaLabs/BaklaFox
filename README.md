@@ -1,167 +1,117 @@
-<img width="100" height="100" src="https://github.com/user-attachments/assets/1c42dda2-b778-4342-9f94-8f852c3ad652" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="browser/Reynard/Resources/Assets.xcassets/AppIcon.appiconset/icon-dark.png">
+  <img alt="BaklaFox" src="browser/Reynard/Resources/Assets.xcassets/AppIcon.appiconset/icon.png" width="100">
+</picture>
 
-# BaklaFox
+# BaklaFox 🦊
 
-BaklaFox is a **Gecko-based** web browser for iOS 13+.
+**A Gecko browser for older iPhones, TrollStore, and jailbreak users.**
 
-Unlike other browsers on iOS that are forced to use Apple's **WebKit** engine (including Safari and all third-party browsers), BaklaFox uses **Gecko**. This is the same engine that powers the Firefox browser on desktop and Android devices.
+BaklaFox is a fork of [Reynard Browser](https://github.com/minh-ton/reynard-browser) that replaces WebKit with **Gecko**, the same engine used by Firefox. This gives older iPhones a more capable browser for modern websites when Safari can no longer keep up.
 
-This project is mainly for users on older iOS versions who are stuck with an outdated version of WebKit. Because WebKit is bundled with the OS, these devices cannot receive engine updates and often fail to load modern websites. By using Gecko, which is kept up to date independently, BaklaFox allows these sites to work again. Users on newer iOS versions can also use the browser if they want an alternative to WebKit, including Firefox add-ons and other Gecko-exclusive features.
+The project is built specifically for **iOS 13 and 14**, with dedicated support for **TrollStore** and **jailbroken devices**. It also includes extensive crash fixes, compatibility patches, and stability improvements over the original Reynard release.
+
+## Downloads
+
+Grab the latest build from the [Releases page](https://github.com/BaklaLabs/BaklaFox/releases).
+
+| Package | For |
+|:--|:--|
+| `BaklaFox-TrollStore.tipa` | TrollStore (JIT included) |
+| `BaklaFox-Jailbroken.ipa` | Jailbroken devices with AppSync Unified |
+| `BaklaFox.ipa` | AltStore, SideStore, or similar |
 
 ## Installation
 
-The latest builds are available for download on the [Releases](https://github.com/BaklaLabs/BaklaFox/releases) page. Please note that this project is still in an early experimental state, so expect bugs and missing features.
+### TrollStore
+1. Download `BaklaFox-TrollStore.tipa`
+2. Open in TrollStore → Install
+3. JIT works automatically
 
-### TrollStore (iOS 14 - 16.6.1, 17.0)
+### Jailbroken
+1. Download `BaklaFox-Jailbroken.ipa`
+2. Install via Filza + AppSync Unified
+3. Use **Choicy** to disable tweak injection if Gecko gets unstable (tweaks can crash it)
 
-For the best experience, I'd recommend sideloading BaklaFox via [TrollStore](https://github.com/opa334/TrollStore) using the `BaklaFox-TrollStore.tipa` build. This gives you automatic JIT enablement, better performance, and automatic app updates. For automatic app updates, make sure that the **URL Scheme Enabled** option is turned on in TrollStore.
+Tested on Taurine (iOS 14). Other jailbreaks may behave differently.
 
-### AltStore or SideStore (iOS 17.0.1+)
+### AltStore / SideStore
+1. Download `BaklaFox.ipa`
+2. Sideload normally
+3. Enable JIT through your signing setup
 
-You should use [AltStore](https://altstore.io/) or [SideStore](https://sidestore.io/) to sideload the `BaklaFox.ipa` build when TrollStore is not available, especially on newer iOS versions. Please note that you must select the **Keep App Extensions** option during installation, as BaklaFox relies on its extensions to function and will not work without them.
+## Compatibility
 
-You can also [click here](https://stikstore.app/altdirect/?url=https://github.com/BaklaLabs/BaklaFox/releases/download/0.0.1-a1/source.json&exclude=livecontainer,stikstore,trollapps,feather) to add the AltSource for BaklaFox to AltStore or SideStore.
+- **iOS 13+** primary focus is 13 and 14
+- Tested on: iPhone SE (2016), iOS 14.4.2, Taurine
+- TrollStore, jailbreak, AltStore all work
+- First launch is slow while Gecko sets up its profile that's normal
+- This is experimental! Some sites, extensions, or setups may still break
 
-> [!IMPORTANT]
-> - **LiveContainer is not supported** due to its own limitations.
-> - Sideloading methods that use a distribution certificate for signing are **not supported**.⁠
-> - Other sideloading methods are **untested**, and **no support will be provided** for issues arising from them.
+## What's different from Reynard
 
-### Jailbroken (iOS 13)
+Beyond a rename and new icons, BaklaFox has a bunch of fixes aimed at stability on older iOS:
 
-Sideload the `BaklaFox-Jailbroken.ipa` build using [Filza File Manager](https://www.tigisoftware.com/default/?page_id=78) with [AppSync Unified](https://github.com/akemin-dayo/AppSync) on a **jailbroken device**. You will also benefit from automatic JIT enablement and better performance.
+| Area | What changed |
+|:--|:--|
+| **App data** | `MOZ_APP_DATA` paths now work on iOS 14 TrollStore |
+| **Startup** | Earlier logging, safer directory setup, graceful failure handling |
+| **Gecko helper** | Forces the right helper extension was launching the wrong one before |
+| **JIT** | Works with TrollStore, jailbreak entitlements, and paired devices |
+| **Add-ons** | UI updates now happen on the main thread no more immediate crashes |
+| **Storage** | Bookmarks, history, downloads etc. won't crash if a directory is missing |
+| **Audio/video** | Fixed for iOS 13 and 14 video was broken on legacy iOS |
+| **Jailbreak** | Fewer crashes from sandbox differences and tweak injection |
 
-## Preview
+## Building from source
 
-### iOS 14 (iPhone 6S Plus, 14.1)
-
-These sites are known to break or render incorrectly on iOS 14. The screenshots below compare how they load in Safari versus BaklaFox.
-
-<table>
-  <tr>
-    <th colspan="2">github.com</th>
-    <th colspan="2">chatgpt.com</th>
-    <th colspan="2">apple.com</th>
-  </tr>
-  <tr>
-    <td align="center">Safari</td>
-    <td align="center">BaklaFox</td>
-    <td align="center">Safari</td>
-    <td align="center">BaklaFox</td>
-    <td align="center">Safari</td>
-    <td align="center">BaklaFox</td>
-  </tr>
-  <tr>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/d89f4385-c478-4aea-aa9d-6c9fca72252b"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/917ee435-39cb-469d-835f-8e69f9e13d03"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/1a68024e-83d4-489c-a576-26d5ea43011c"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/6880b1ac-63f9-421f-a373-5d69c5745cd7"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/d237118e-be3b-43d1-b14c-032784b43571"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/9f799569-d712-44d0-918a-21d523874c6e"><br>
-    </td>
-  </tr>
-</table>
-
-### iOS 15 (iPhone 7, 15.8.6)
-
-<table>
-  <tr>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/a7f1b302-51b6-4afe-a2ce-35b518e5b761"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/f5dbfba5-c1a8-4729-bd7d-b96a7ace1237"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/986c8cfb-7979-4f4b-9305-73ebd1a87b19"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/544ff493-6807-4b2f-b526-6d34f029e1d3"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/31ef9486-8631-4d0e-ad9a-1281d513151f"><br>
-    </td>
-  </tr>
-</table>
-
-### iOS 26 (iPhone 13 mini, 26.1)
-
-BaklaFox also works great on the latest version of iOS!
-
-<table>
-  <tr>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/974e8ce1-f798-4bef-bac1-621ee535c5ee"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/1429c985-f439-4e58-9385-0eefef4add4c"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/a9eeaf68-828f-4ead-b619-8b9914e0ed2c"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/bbc08422-4bf3-4928-933e-71cdad551fed"><br>
-    </td>
-    <td>
-      <img width=150 src="https://github.com/user-attachments/assets/cf01d298-a8d2-49ea-a557-7b1bbd1d893a"><br>
-    </td>
-  </tr>
-</table>
-
-## Building
-
-> [!WARNING]
-> Build instructions are included below for reference. Please be aware that I **do not** provide support for issues or errors encountered during the build process.
-
-To build the project, you'll need Xcode, [Python 3](https://www.python.org/downloads/), [Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html), and [ldid](https://formulae.brew.sh/formula/ldid).
-
-Clone the repository.
+### Requirements
+- macOS + Xcode 16+
+- Homebrew + `ldid`
+- Enough disk space for Gecko (~15 GB free)
 
 ```bash
-git clone --recursive https://github.com/BaklaLabs/BaklaFox
+# Install tools
+brew install ldid
+
+# Clone + submodules
+git clone --recursive https://github.com/BaklaLabs/BaklaFox.git
 cd BaklaFox
+
+# Download & patch Gecko (Firefox engine)
+tools/development/update-gecko.sh
+tools/development/apply-patches.sh
+
+# Build JIT library & Gecko
+tools/development/build-idevice.sh
+tools/development/build-gecko.sh
+
+# Build app & create packages
+tools/release/build-app.sh
+tools/release/create-ipa.sh
 ```
 
-Download Gecko and apply patches.
+Output lands in `dist/`:
+
+```
+BaklaFox.ipa
+BaklaFox-TrollStore.tipa
+BaklaFox-Jailbroken.ipa
+```
+
+After the first full build, app-only changes only need:
 
 ```bash
-./tools/development/update-gecko.sh
-./tools/development/apply-patches.sh
+tools/release/build-app.sh
+tools/release/create-ipa.sh
 ```
 
-Build dependencies and the Gecko engine.
+## Credits
 
-```bash
-./tools/development/build-idevice.sh
-./tools/development/build-gecko.sh
-```
+BaklaFox is based on [Reynard Browser](https://github.com/minh-ton/reynard-browser) by [Minh Ton](https://github.com/minh-ton).
 
-To run BaklaFox, open `BFXGecko.xcodeproj` in Xcode and build/run it from there.
+App code: GPLv3 · Gecko patches: MPL 2.0
 
-## Notes
+---
 
-This project initially started out of curiosity. I wanted to see if I could get Gecko to run without the [BrowserEngineKit](https://developer.apple.com/documentation/browserenginekit) framework, so it could be further modified to run on iOS versions as far back as possible. I got it working, and since then, I’ve been focusing on developing engine patches for better UIKit integration, fixing bugs, and turning this into a full, usable browser.
-
-If you’ve come across this repository and find it interesting, I’d love to get help or collaborate on it. I’m learning as I go here and don’t have much prior experience with iOS app development or with Gecko itself, so any contributions, feedback, or pointers would be greatly appreciated.
-
-## Acknowledgements
-- [LiveContainer](https://github.com/LiveContainer/LiveContainer): app extension handling and NSExtension usage.
-- [StikDebug](https://github.com/StephenDev0/StikDebug) and [idevice](https://github.com/jkcoxson/idevice): pairing-based JIT enablement support.
-- [TrollStore](https://github.com/opa334/TrollStore): spawning a binary as root and JIT enablement.
-- [Amethyst-iOS](https://github.com/AngelAuraMC/Amethyst-iOS), [dolphin-ios](https://github.com/OatmealDome/dolphin-ios), [DukeX](https://github.com/MaftyManicEMU/DukeX), and [MeloNX](https://git.ryujinx.app/projects/MeloNX): Various utility functions, numerous private API usage, and JIT memory handling.
-- [Pre-existing work](https://bugzilla.mozilla.org/show_bug.cgi?id=1882872) on bringing Gecko to iOS using BrowserEngineKit: most of the difficult engine integration.
-
-## License
-
-This project is licensed under the [GNU General Public License v3.0](https://github.com/BaklaLabs/BaklaFox/blob/main/LICENSE), except for the `patches` directory containing the modifications to the Firefox Gecko engine and therefore is licensed under the [Mozilla Public License 2.0](https://github.com/BaklaLabs/BaklaFox/blob/main/LICENSE.firefox).
+<p align="center">🦊 Made with love at <strong>BaklaLabs</strong></p>
