@@ -1,0 +1,26 @@
+diff --git a/ipc/glue/moz.build b/ipc/glue/moz.build
+index 9c24b5b79ce4..8f85270e3c85 100644
+--- a/ipc/glue/moz.build
++++ b/ipc/glue/moz.build
+@@ -149,10 +149,10 @@ if CONFIG["OS_ARCH"] != "WINNT":
+ 
+ if CONFIG["TARGET_OS"] == "iOS":
+     EXPORTS.mozilla.ipc += [
+-        "ExtensionKitUtils.h",
++        "NSExtensionUtils.h",
+     ]
+     UNIFIED_SOURCES += [
+-        "ExtensionKitUtils.mm",
++        "NSExtensionUtils.mm",
+     ]
+ 
+ EXPORTS.ipc += [
+@@ -289,8 +289,6 @@ FINAL_LIBRARY = "xul"
+ 
+ if CONFIG["TARGET_OS"] == "OSX":
+     OS_LIBS += ["bsm"]  # for audit_token_to_pid
+-elif CONFIG["TARGET_OS"] == "iOS":
+-    OS_LIBS += ["-framework BrowserEngineKit"]
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
+     OS_LIBS += ["android"]
+ 

@@ -1,0 +1,42 @@
+diff --git a/widget/uikit/nsClipboard.h b/widget/uikit/nsClipboard.h
+new file mode 100644
+index 000000000000..3013ac2696d6
+--- /dev/null
++++ b/widget/uikit/nsClipboard.h
+@@ -0,0 +1,36 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef NS_CLIPBOARD_H
++#define NS_CLIPBOARD_H
++
++#include "nsBaseClipboard.h"
++
++class nsClipboard final : public nsBaseClipboard {
++ private:
++  ~nsClipboard();
++
++ public:
++  nsClipboard();
++
++  NS_DECL_ISUPPORTS_INHERITED
++
++  mozilla::Result<int32_t, nsresult> GetNativeClipboardSequenceNumber(
++      ClipboardType aWhichClipboard) override;
++
++ protected:
++  NS_IMETHOD SetNativeClipboardData(nsITransferable* aTransferable,
++                                    ClipboardType aWhichClipboard) override;
++  mozilla::Result<nsCOMPtr<nsISupports>, nsresult> GetNativeClipboardData(
++      const nsACString& aFlavor, ClipboardType aWhichClipboard) override;
++  nsresult EmptyNativeClipboardData(ClipboardType aWhichClipboard) override;
++  mozilla::Result<bool, nsresult> HasNativeClipboardDataMatchingFlavors(
++      const nsTArray<nsCString>& aFlavorList,
++      ClipboardType aWhichClipboard) override;
++};
++
++#endif

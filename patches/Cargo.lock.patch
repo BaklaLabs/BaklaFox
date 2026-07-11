@@ -1,0 +1,12 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index f7469493a0ac..8421b503e731 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -8933,6 +8933,7 @@ dependencies = [
+  "bincode",
+  "core-foundation 0.9.999",
+  "core-graphics",
++ "core-text",
+  "dirs",
+  "dwrote",
+  "euclid",

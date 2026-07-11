@@ -1,0 +1,22 @@
+diff --git a/dom/media/MediaManager.h b/dom/media/MediaManager.h
+index 3dac2943b391..14762133f9f1 100644
+--- a/dom/media/MediaManager.h
++++ b/dom/media/MediaManager.h
+@@ -88,7 +88,8 @@ class MediaDevice final {
+   MediaDevice(MediaEngine* aEngine, dom::MediaSourceEnum aMediaSource,
+               const nsString& aRawName, const nsString& aRawID,
+               const nsString& aRawGroupID, IsScary aIsScary,
+-              const OsPromptable canRequestOsLevelPrompt);
++              const OsPromptable canRequestOsLevelPrompt,
++              Maybe<dom::VideoFacingModeEnum> aFacingMode = Nothing());
+ 
+   MediaDevice(MediaEngine* aEngine,
+               const RefPtr<AudioDeviceInfo>& aAudioDeviceInfo,
+@@ -114,6 +115,7 @@ class MediaDevice final {
+   const nsString mRawID;
+   const nsString mRawGroupID;
+   const nsString mRawName;
++  const Maybe<dom::VideoFacingModeEnum> mFacingMode;
+ };
+ 
+ /**

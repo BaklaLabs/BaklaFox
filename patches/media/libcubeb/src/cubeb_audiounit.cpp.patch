@@ -1,0 +1,327 @@
+diff --git a/media/libcubeb/src/cubeb_audiounit.cpp b/media/libcubeb/src/cubeb_audiounit.cpp
+index d1a217687acd..af5712315442 100644
+--- a/media/libcubeb/src/cubeb_audiounit.cpp
++++ b/media/libcubeb/src/cubeb_audiounit.cpp
+@@ -299,6 +299,12 @@ struct cubeb_stream {
+   unique_ptr<property_listener> input_source_listener;
+   unique_ptr<property_listener> output_source_listener;
+   #endif
++#if TARGET_OS_IPHONE
++  // REYNARD: kHALOutputParam_Volume is unavailable on RemoteIO,
++  // so volume is applied as a software gain multiplier in the 
++  // render callback instead.
++  atomic<float> software_volume{1.0f};
++#endif
+ };
+ 
+ bool
+@@ -756,9 +762,39 @@ audiounit_output_callback(void * user_ptr,
+                                 outBufferList->mBuffers[0].mDataByteSize);
+   }
+ 
++#if TARGET_OS_IPHONE
++  // REYNARD: Apply software volume.
++  float vol = stm->software_volume.load(memory_order_relaxed);
++  if (vol != 1.0f) {
++    float * samples =
++        static_cast<float *>(outBufferList->mBuffers[0].mData);
++    uint32_t sample_count =
++        output_frames * outBufferList->mBuffers[0].mNumberChannels;
++    for (uint32_t i = 0; i < sample_count; i++) {
++      samples[i] *= vol;
++    }
++  }
++#endif
++
+   return noErr;
+ }
+ 
++#if TARGET_OS_IPHONE
++/* Defined in cubeb_audiounit_ios.mm */
++extern "C" void cubeb_ios_activate_audio_session(
++    bool aRecording, uint32_t aPreferredOutputChannels);
++extern "C" uint32_t cubeb_ios_session_sample_rate(void);
++extern "C" uint32_t cubeb_ios_copy_available_inputs(
++    cubeb_device_info ** aDevices);
++extern "C" uint32_t cubeb_ios_copy_available_outputs(
++    cubeb_device_info ** aDevices);
++extern "C" uint32_t cubeb_ios_max_output_channel_count(void);
++extern "C" uint32_t cubeb_ios_output_latency_frames(void);
++extern "C" bool cubeb_ios_copy_current_device_names(char ** aInputName,
++                                                    char ** aOutputName);
++extern "C" bool cubeb_ios_set_preferred_input(cubeb_devid aDeviceId);
++#endif
++
+ extern "C" {
+ int
+ audiounit_init(cubeb ** context, char const * /* context_name */)
+@@ -1293,8 +1329,7 @@ int
+ audiounit_get_max_channel_count(cubeb * ctx, uint32_t * max_channels)
+ {
+ #if TARGET_OS_IPHONE
+-  // TODO: [[AVAudioSession sharedInstance] maximumOutputNumberOfChannels]
+-  *max_channels = 2;
++  *max_channels = cubeb_ios_max_output_channel_count();
+ #else
+   UInt32 size;
+   OSStatus r;
+@@ -1349,8 +1384,8 @@ static int
+ audiounit_get_preferred_sample_rate(cubeb * /* ctx */, uint32_t * rate)
+ {
+ #if TARGET_OS_IPHONE
+-  *rate = 44100;
+-  return CUBEB_OK;
++  *rate = cubeb_ios_session_sample_rate();
++  return *rate ? CUBEB_OK : CUBEB_ERROR;
+ #else
+   UInt32 size;
+   OSStatus r;
+@@ -2190,6 +2225,7 @@ audiounit_create_unit(AudioUnit * unit, device_info * device)
+     assert(false);
+   }
+ 
++#if !TARGET_OS_IPHONE
+   rv = AudioUnitSetProperty(*unit, kAudioOutputUnitProperty_CurrentDevice,
+                             kAudioUnitScope_Global, 0, &device->id,
+                             sizeof(AudioDeviceID));
+@@ -2198,6 +2234,7 @@ audiounit_create_unit(AudioUnit * unit, device_info * device)
+         rv);
+     return CUBEB_ERROR;
+   }
++#endif
+ 
+   return CUBEB_OK;
+ }
+@@ -2461,6 +2498,15 @@ audiounit_configure_input(cubeb_stream * stm)
+     return CUBEB_ERROR;
+   }
+   stm->input_hw_rate = input_hw_desc.mSampleRate;
++#if TARGET_OS_IPHONE
++  if (!stm->input_hw_rate) {
++    stm->input_hw_rate = cubeb_ios_session_sample_rate();
++  }
++#endif
++  if (!stm->input_hw_rate) {
++    LOG("(%p) Input device sampling rate is unavailable.", stm);
++    return CUBEB_ERROR;
++  }
+   LOG("(%p) Input device sampling rate: %.2f", stm, stm->input_hw_rate);
+ 
+   /* Set format description according to the input params. */
+@@ -2563,6 +2609,15 @@ audiounit_configure_output(cubeb_stream * stm)
+     return CUBEB_ERROR;
+   }
+   stm->output_hw_rate = output_hw_desc.mSampleRate;
++#if TARGET_OS_IPHONE
++  if (!stm->output_hw_rate) {
++    stm->output_hw_rate = cubeb_ios_session_sample_rate();
++  }
++#endif
++  if (!stm->output_hw_rate) {
++    LOG("(%p) Output device sampling rate is unavailable.", stm);
++    return CUBEB_ERROR;
++  }
+   if (!is_common_sample_rate(stm->output_desc.mSampleRate)) {
+     /* For uncommon sample rates, we may run into issues with the OS
+        resampler if we don't do the resampling ourselves, so set the
+@@ -2647,6 +2702,21 @@ audiounit_setup_stream(cubeb_stream * stm)
+ 
+   int r = 0;
+ 
++#if TARGET_OS_IPHONE
++  // RemoteIO input requires a record-capable audio session category.
++  uint32_t preferred_output_channels =
++      has_output(stm) ? stm->output_stream_params.channels : 0;
++  cubeb_ios_activate_audio_session(has_input(stm), preferred_output_channels);
++  cubeb_devid input_device = nullptr;
++  if (has_input(stm) && stm->input_device.id != kAudioObjectUnknown) {
++    input_device = reinterpret_cast<cubeb_devid>(
++        static_cast<uintptr_t>(stm->input_device.id));
++  }
++  if (!cubeb_ios_set_preferred_input(input_device)) {
++    return CUBEB_ERROR;
++  }
++#endif
++
+   device_info in_dev_info = stm->input_device;
+   device_info out_dev_info = stm->output_device;
+ 
+@@ -2813,10 +2883,12 @@ audiounit_setup_stream(cubeb_stream * stm)
+       return CUBEB_ERROR;
+     }
+ 
+-    #if !TARGET_OS_IPHONE
++#if TARGET_OS_IPHONE
++    stm->current_latency_frames = cubeb_ios_output_latency_frames();
++#else
+     stm->current_latency_frames = audiounit_get_device_presentation_latency(
+         stm->output_device.id, kAudioDevicePropertyScopeOutput);
+-    #endif
++#endif
+ 
+     Float64 unit_s;
+     UInt32 size = sizeof(unit_s);
+@@ -2889,25 +2961,31 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream,
+   }
+   if (input_stream_params) {
+     stm->input_stream_params = *input_stream_params;
+-  #if !TARGET_OS_IPHONE
++#if TARGET_OS_IPHONE
++    stm->input_device.id =
++        static_cast<AudioDeviceID>(reinterpret_cast<uintptr_t>(input_device));
++    stm->input_device.flags = DEV_INPUT;
++#else
+     r = audiounit_set_device_info(
+         stm.get(), reinterpret_cast<uintptr_t>(input_device), io_side::INPUT);
+     if (r != CUBEB_OK) {
+       LOG("(%p) Fail to set device info for input.", stm.get());
+       return r;
+     }
+-  #endif
++#endif
+   }
+   if (output_stream_params) {
+     stm->output_stream_params = *output_stream_params;
+-  #if !TARGET_OS_IPHONE
++#if TARGET_OS_IPHONE
++    stm->output_device.flags = DEV_OUTPUT;
++#else
+     r = audiounit_set_device_info(
+         stm.get(), reinterpret_cast<uintptr_t>(output_device), io_side::OUTPUT);
+     if (r != CUBEB_OK) {
+       LOG("(%p) Fail to set device info for output.", stm.get());
+       return r;
+     }
+-  #endif
++#endif
+   }
+ 
+   {
+@@ -3115,6 +3193,10 @@ audiounit_stream_get_latency(cubeb_stream * stm, uint32_t * latency)
+ static int
+ audiounit_stream_get_volume(cubeb_stream * stm, float * volume)
+ {
++#if TARGET_OS_IPHONE
++  *volume = stm->software_volume.load(memory_order_relaxed);
++  return CUBEB_OK;
++#else
+   assert(stm->output_unit);
+   OSStatus r = AudioUnitGetParameter(stm->output_unit, kHALOutputParam_Volume,
+                                      kAudioUnitScope_Global, 0, volume);
+@@ -3123,11 +3205,16 @@ audiounit_stream_get_volume(cubeb_stream * stm, float * volume)
+     return CUBEB_ERROR;
+   }
+   return CUBEB_OK;
++#endif
+ }
+ 
+ static int
+ audiounit_stream_set_volume(cubeb_stream * stm, float volume)
+ {
++#if TARGET_OS_IPHONE
++  stm->software_volume.store(volume, memory_order_relaxed);
++  return CUBEB_OK;
++#else
+   assert(stm->output_unit);
+   OSStatus r;
+   r = AudioUnitSetParameter(stm->output_unit, kHALOutputParam_Volume,
+@@ -3138,6 +3225,7 @@ audiounit_stream_set_volume(cubeb_stream * stm, float volume)
+     return CUBEB_ERROR;
+   }
+   return CUBEB_OK;
++#endif
+ }
+ 
+ unique_ptr<char[]>
+@@ -3215,8 +3303,19 @@ audiounit_stream_get_current_device(cubeb_stream * stm,
+                                     cubeb_device ** const device)
+ {
+ #if TARGET_OS_IPHONE
+-  // TODO
+-  return CUBEB_ERROR_NOT_SUPPORTED;
++  (void)stm;
++  *device = new cubeb_device;
++  if (!*device) {
++    return CUBEB_ERROR;
++  }
++  PodZero(*device, 1);
++  if (!cubeb_ios_copy_current_device_names(&(*device)->input_name,
++                                           &(*device)->output_name)) {
++    delete *device;
++    *device = NULL;
++    return CUBEB_ERROR;
++  }
++  return CUBEB_OK;
+ #else
+   *device = new cubeb_device;
+   if (!*device) {
+@@ -3510,7 +3609,40 @@ static int
+ audiounit_enumerate_devices(cubeb * /* context */, cubeb_device_type type,
+                             cubeb_device_collection * collection)
+ {
+-  return CUBEB_ERROR_NOT_SUPPORTED;
++  cubeb_ios_activate_audio_session(type & CUBEB_DEVICE_TYPE_INPUT, 0);
++
++  cubeb_device_info * input_devices = NULL;
++  uint32_t input_count = 0;
++  if (type & CUBEB_DEVICE_TYPE_INPUT) {
++    input_count = cubeb_ios_copy_available_inputs(&input_devices);
++  }
++
++  cubeb_device_info * output_devices = NULL;
++  uint32_t output_count = 0;
++  if (type & CUBEB_DEVICE_TYPE_OUTPUT) {
++    output_count = cubeb_ios_copy_available_outputs(&output_devices);
++  }
++
++  uint32_t count = input_count + output_count;
++
++  collection->count = count;
++  if (!count) {
++    collection->device = NULL;
++    return CUBEB_OK;
++  }
++
++  auto devices = new cubeb_device_info[count];
++  uint32_t index = 0;
++  for (uint32_t i = 0; i < input_count; ++i) {
++    devices[index++] = input_devices[i];
++  }
++  delete[] input_devices;
++  for (uint32_t i = 0; i < output_count; ++i) {
++    devices[index++] = output_devices[i];
++  }
++  delete[] output_devices;
++  collection->device = devices;
++  return CUBEB_OK;
+ }
+ #else
+ static int
+@@ -3584,16 +3716,23 @@ static int
+ audiounit_device_collection_destroy(cubeb * /* context */,
+                                     cubeb_device_collection * collection)
+ {
+-  #if TARGET_OS_IPHONE
+-  return CUBEB_ERROR_NOT_SUPPORTED;
+-  #else
++#if TARGET_OS_IPHONE
++  for (size_t i = 0; i < collection->count; i++) {
++    delete[] collection->device[i].device_id;
++    delete[] collection->device[i].friendly_name;
++    delete[] collection->device[i].group_id;
++    delete[] collection->device[i].vendor_name;
++  }
++  delete[] collection->device;
++  return CUBEB_OK;
++#else
+   for (size_t i = 0; i < collection->count; i++) {
+     audiounit_device_destroy(&collection->device[i]);
+   }
+   delete[] collection->device;
+ 
+   return CUBEB_OK;
+-  #endif
++#endif
+ }
+ 
+ #if !TARGET_OS_IPHONE

@@ -1,0 +1,19 @@
+diff --git a/dom/media/systemservices/objc_video_capture/device_info.mm b/dom/media/systemservices/objc_video_capture/device_info.mm
+index 115c822a2493..38e3e4b01412 100644
+--- a/dom/media/systemservices/objc_video_capture/device_info.mm
++++ b/dom/media/systemservices/objc_video_capture/device_info.mm
+@@ -38,10 +38,14 @@
+   return -1;
+ 
+ VideoCaptureModule::DeviceInfo* VideoCaptureImpl::CreateDeviceInfo() {
++#ifdef MOZ_WIDGET_UIKIT
++  return new DeviceInfoAvFoundation();
++#else
+   if (StaticPrefs::media_getusermedia_camera_macavf_enabled_AtStartup()) {
+     return new DeviceInfoAvFoundation();
+   }
+   return new DeviceInfoIos();
++#endif
+ }
+ 
+ DeviceInfoIos::DeviceInfoIos() { this->Init(); }

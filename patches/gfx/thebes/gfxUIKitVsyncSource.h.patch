@@ -1,0 +1,27 @@
+diff --git a/gfx/thebes/gfxUIKitVsyncSource.h b/gfx/thebes/gfxUIKitVsyncSource.h
+new file mode 100644
+index 000000000000..b823b3174411
+--- /dev/null
++++ b/gfx/thebes/gfxUIKitVsyncSource.h
+@@ -0,0 +1,21 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef GFX_UIKIT_VSYNC_SOURCE_H
++#define GFX_UIKIT_VSYNC_SOURCE_H
++
++#include "mozilla/RefPtr.h"
++
++namespace mozilla::gfx {
++
++class VsyncSource;
++
++already_AddRefed<VsyncSource> CreateUIKitVsyncSource();
++
++}  // namespace mozilla::gfx
++
++#endif /* GFX_UIKIT_VSYNC_SOURCE_H */

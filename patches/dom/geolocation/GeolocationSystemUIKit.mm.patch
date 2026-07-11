@@ -1,0 +1,238 @@
+diff --git a/dom/geolocation/GeolocationSystemUIKit.mm b/dom/geolocation/GeolocationSystemUIKit.mm
+new file mode 100644
+index 000000000000..97ad041a1064
+--- /dev/null
++++ b/dom/geolocation/GeolocationSystemUIKit.mm
+@@ -0,0 +1,232 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#include <CoreLocation/CLLocationManager.h>
++#include <CoreLocation/CLLocationManagerDelegate.h>
++#import <UIKit/UIKit.h>
++
++#include "GeolocationSystem.h"
++#include "mozilla/WeakPtr.h"
++#include "mozilla/dom/BrowsingContext.h"
++#include "nsThreadUtils.h"
++
++namespace mozilla::dom::geolocation {
++class UIKitGeolocationPermissionRequest;
++}
++
++@interface LocationPermissionDelegate : NSObject <CLLocationManagerDelegate> {
++ @private
++  mozilla::WeakPtr<mozilla::dom::geolocation::UIKitGeolocationPermissionRequest>
++      mRequest;
++}
++- (id)initWithRequest:
++    (mozilla::WeakPtr<
++        mozilla::dom::geolocation::UIKitGeolocationPermissionRequest>)aRequest;
++- (void)locationManagerDidChangeAuthorization:(CLLocationManager*)manager;
++- (void)locationManager:(CLLocationManager*)manager
++    didChangeAuthorizationStatus:(CLAuthorizationStatus)status;
++@end
++
++namespace mozilla::dom::geolocation {
++
++class UIKitGeolocationPermissionRequest final
++    : public SystemGeolocationPermissionRequest,
++      public SupportsWeakPtr {
++ public:
++  NS_INLINE_DECL_REFCOUNTING(UIKitGeolocationPermissionRequest, override);
++
++  explicit UIKitGeolocationPermissionRequest(BrowsingContext*) {}
++
++  void Init(ParentRequestResolver&& aResolver, bool aSystemWillPrompt) {
++    MOZ_ASSERT(NS_IsMainThread());
++
++    mLocationManager = [[CLLocationManager alloc] init];
++    if (!mLocationManager) {
++      aResolver(GeolocationPermissionStatus::Error);
++      return;
++    }
++
++    mLocationManager.delegate =
++        [[LocationPermissionDelegate alloc] initWithRequest:WeakPtr(this)];
++    if (!mLocationManager.delegate) {
++      [mLocationManager release];
++      mLocationManager = nil;
++      aResolver(GeolocationPermissionStatus::Error);
++      return;
++    }
++
++    mResolver = std::move(aResolver);
++    mShouldDismissUI = aSystemWillPrompt;
++    mIsRunning = true;
++    mSelfReference = this;
++
++    if (aSystemWillPrompt) {
++      [mLocationManager requestWhenInUseAuthorization];
++      return;
++    }
++
++    NSURL* url = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
++    UIApplication* application = [UIApplication sharedApplication];
++    if (!url || !application || ![application canOpenURL:url]) {
++      StopWithError();
++      return;
++    }
++
++    [application openURL:url options:@{} completionHandler:nil];
++  }
++
++  void Stop() override {
++    MOZ_ASSERT(NS_IsMainThread());
++    if (!mIsRunning) {
++      return;
++    }
++    RefPtr<UIKitGeolocationPermissionRequest> deathGrip(this);
++    mIsRunning = false;
++
++    if (PermissionIsGranted()) {
++      mResolver(GeolocationPermissionStatus::Granted);
++    } else {
++      mResolver(GeolocationPermissionStatus::Canceled);
++    }
++
++    if (mLocationManager) {
++      if (mLocationManager.delegate) {
++        [mLocationManager.delegate release];
++        mLocationManager.delegate = nil;
++      }
++      [mLocationManager release];
++      mLocationManager = nil;
++    }
++
++    mSelfReference = nullptr;
++  }
++
++  void StopWithError() {
++    MOZ_ASSERT(NS_IsMainThread());
++    if (!mIsRunning) {
++      return;
++    }
++    RefPtr<UIKitGeolocationPermissionRequest> deathGrip(this);
++    mIsRunning = false;
++
++    if (mLocationManager) {
++      if (mLocationManager.delegate) {
++        [mLocationManager.delegate release];
++        mLocationManager.delegate = nil;
++      }
++      [mLocationManager release];
++      mLocationManager = nil;
++    }
++
++    mResolver(GeolocationPermissionStatus::Error);
++    mSelfReference = nullptr;
++  }
++
++  bool IsStopped() const { return !mIsRunning; }
++
++  bool PermissionIsGranted() {
++    switch (GetAuthorizationStatus()) {
++      case kCLAuthorizationStatusAuthorizedAlways:
++      case kCLAuthorizationStatusAuthorizedWhenInUse:
++        return true;
++      default:
++        return false;
++    }
++  }
++
++  bool PermissionChangeDismissesUI() {
++    CLAuthorizationStatus status = GetAuthorizationStatus();
++    return PermissionIsGranted() ||
++           (mShouldDismissUI && (status == kCLAuthorizationStatusDenied ||
++                                 status == kCLAuthorizationStatusRestricted));
++  }
++
++ protected:
++  virtual ~UIKitGeolocationPermissionRequest() { Stop(); }
++
++  CLAuthorizationStatus GetAuthorizationStatus() {
++    MOZ_ASSERT(mLocationManager);
++    return [CLLocationManager authorizationStatus];
++  }
++
++  ParentRequestResolver mResolver;
++  RefPtr<UIKitGeolocationPermissionRequest> mSelfReference;
++  CLLocationManager* mLocationManager = nil;
++  bool mShouldDismissUI = false;
++  bool mIsRunning = false;
++};
++
++static CLAuthorizationStatus GetAuthorizationStatus() {
++  return [CLLocationManager authorizationStatus];
++}
++
++SystemGeolocationPermissionBehavior GetGeolocationPermissionBehavior() {
++  CLAuthorizationStatus status = GetAuthorizationStatus();
++  switch (status) {
++    case kCLAuthorizationStatusDenied:
++      return SystemGeolocationPermissionBehavior::GeckoWillPromptUser;
++    case kCLAuthorizationStatusNotDetermined:
++      return SystemGeolocationPermissionBehavior::SystemWillPromptUser;
++    case kCLAuthorizationStatusAuthorizedAlways:
++    case kCLAuthorizationStatusAuthorizedWhenInUse:
++      return SystemGeolocationPermissionBehavior::NoPrompt;
++    case kCLAuthorizationStatusRestricted:
++    default:
++      return SystemGeolocationPermissionBehavior::NoPrompt;
++  }
++}
++
++already_AddRefed<SystemGeolocationPermissionRequest>
++RequestLocationPermissionFromUser(BrowsingContext* aBrowsingContext,
++                                  ParentRequestResolver&& aResolver) {
++  auto permission = GetGeolocationPermissionBehavior();
++  if (permission == SystemGeolocationPermissionBehavior::NoPrompt) {
++    aResolver(GeolocationPermissionStatus::Granted);
++    return nullptr;
++  }
++
++  RefPtr<UIKitGeolocationPermissionRequest> permissionRequest =
++      new UIKitGeolocationPermissionRequest(aBrowsingContext);
++  permissionRequest->Init(
++      std::move(aResolver),
++      permission == SystemGeolocationPermissionBehavior::SystemWillPromptUser);
++  if (permissionRequest->IsStopped()) {
++    return nullptr;
++  }
++  return permissionRequest.forget();
++}
++
++}  // namespace mozilla::dom::geolocation
++
++@implementation LocationPermissionDelegate
++
++- (id)initWithRequest:
++    (mozilla::WeakPtr<
++        mozilla::dom::geolocation::UIKitGeolocationPermissionRequest>)aRequest {
++  if ((self = [super init])) {
++    mRequest = aRequest;
++  }
++  return self;
++}
++
++- (void)handleAuthorizationChange {
++  RefPtr<mozilla::dom::geolocation::UIKitGeolocationPermissionRequest> request(
++      mRequest);
++  if (request && request->PermissionChangeDismissesUI()) {
++    request->Stop();
++  }
++}
++
++- (void)locationManagerDidChangeAuthorization:(CLLocationManager*)aManager {
++  [self handleAuthorizationChange];
++}
++
++- (void)locationManager:(CLLocationManager*)aManager
++    didChangeAuthorizationStatus:(CLAuthorizationStatus)aStatus {
++  [self handleAuthorizationChange];
++}
++@end

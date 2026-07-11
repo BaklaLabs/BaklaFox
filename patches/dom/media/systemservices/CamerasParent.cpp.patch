@@ -1,0 +1,207 @@
+diff --git a/dom/media/systemservices/CamerasParent.cpp b/dom/media/systemservices/CamerasParent.cpp
+index ee58a03ac663..7f1aa0f15cb9 100644
+--- a/dom/media/systemservices/CamerasParent.cpp
++++ b/dom/media/systemservices/CamerasParent.cpp
+@@ -34,6 +34,10 @@
+ #include "video_engine/desktop_capture_impl.h"
+ #include "video_engine/video_capture_factory.h"
+ 
++#ifdef MOZ_WIDGET_UIKIT
++#  include "objc_video_capture/capture_access.h"
++#endif
++
+ #if defined(_WIN32)
+ #  include <process.h>
+ #  define getpid() _getpid()
+@@ -1153,10 +1157,15 @@ ipc::IPCResult CamerasParent::RecvGetCaptureDevice(
+               return;
+             }
+             bool scary = (devicePid == getpid());
++            uint8_t facingMode = 0;
++#ifdef MOZ_WIDGET_UIKIT
++            facingMode =
++                static_cast<uint8_t>(GetAVCaptureDeviceFacingMode(uniqueId));
++#endif
+ 
+             LOG("Returning %s name %s id (pid = %d)%s", name.get(),
+                 uniqueId.get(), devicePid, (scary ? " (scary)" : ""));
+-            (void)SendReplyGetCaptureDevice(name, uniqueId, scary);
++            (void)SendReplyGetCaptureDevice(name, uniqueId, scary, facingMode);
+           });
+   return IPC_OK();
+ }
+@@ -1667,13 +1676,21 @@ CamerasParent::CamerasParent()
+ }
+ 
+ /* static */
+-auto CamerasParent::RequestCameraAccess(bool aAllowPermissionRequest)
++auto CamerasParent::RequestCameraAccess(bool aAllowPermissionRequest,
++                                        bool aRequestCamera,
++                                        bool aRequestMicrophone)
+     -> RefPtr<CameraAccessRequestPromise> {
+   ipc::AssertIsOnBackgroundThread();
+ 
+   // Special case for PipeWire where we at this point just need to make sure
+   // we have information about camera availabilty through the camera portal
+   if (!aAllowPermissionRequest) {
++    if (!aRequestCamera) {
++      return CameraAccessRequestPromise::CreateAndResolve(
++          CamerasAccessStatus::Granted,
++          "CamerasParent::RequestCameraAccess no camera request");
++    }
++
+     return EnsureVideoCaptureFactory()->UpdateCameraAvailability()->Then(
+         GetCurrentSerialEventTarget(),
+         "CamerasParent::RequestCameraAccess update camera availability",
+@@ -1693,52 +1710,107 @@ auto CamerasParent::RequestCameraAccess(bool aAllowPermissionRequest)
+         });
+   }
+ 
+-  static StaticRefPtr<CameraAccessRequestPromise> sCameraAccessRequestPromise;
+-  if (!sCameraAccessRequestPromise) {
+-    sCameraAccessRequestPromise = RefPtr<CameraAccessRequestPromise>(
+-        EnsureVideoCaptureFactory()->InitCameraBackend()->Then(
+-            GetCurrentSerialEventTarget(),
+-            "CamerasParent::RequestCameraAccess camera backend init handler",
+-            [](nsresult aRv) mutable {
+-              MOZ_ASSERT(NS_SUCCEEDED(aRv));
+-              ClearCameraDeviceInfo();
++  if (!aRequestCamera) {
++#ifdef MOZ_WIDGET_UIKIT
++    if (aRequestMicrophone) {
++      return RequestAVCaptureAccess(false, true)
++          ->Then(
++              GetCurrentSerialEventTarget(), __func__,
++              [](CamerasAccessStatus aStatus) {
++                return CameraAccessRequestPromise::CreateAndResolve(
++                    aStatus,
++                    "CamerasParent::RequestCameraAccess microphone-only "
++                    "resolve");
++              },
++              [](nsresult) {
++                return CameraAccessRequestPromise::CreateAndResolve(
++                    CamerasAccessStatus::Error,
++                    "CamerasParent::RequestCameraAccess microphone-only "
++                    "reject");
++              });
++    }
++#endif
++
++    return CameraAccessRequestPromise::CreateAndResolve(
++        CamerasAccessStatus::Granted,
++        "CamerasParent::RequestCameraAccess no camera backend init required");
++  }
++
++  auto requestCameraBackendAccess =
++      [aAllowPermissionRequest, aRequestCamera,
++       aRequestMicrophone]() -> RefPtr<CameraAccessRequestPromise> {
++    static StaticRefPtr<CameraAccessRequestPromise> sCameraAccessRequestPromise;
++    if (!sCameraAccessRequestPromise) {
++      sCameraAccessRequestPromise = RefPtr<CameraAccessRequestPromise>(
++          EnsureVideoCaptureFactory()->InitCameraBackend()->Then(
++              GetCurrentSerialEventTarget(),
++              "CamerasParent::RequestCameraAccess camera backend init handler",
++              [](nsresult aRv) mutable {
++                MOZ_ASSERT(NS_SUCCEEDED(aRv));
++                ClearCameraDeviceInfo();
++                return CameraAccessRequestPromise::CreateAndResolve(
++                    CamerasAccessStatus::Granted,
++                    "CamerasParent::RequestCameraAccess camera backend init "
++                    "resolve");
++              },
++              [](nsresult aRv) mutable {
++                MOZ_ASSERT(NS_FAILED(aRv));
++                return CameraAccessRequestPromise::CreateAndResolve(
++                    aRv == NS_ERROR_DOM_MEDIA_NOT_ALLOWED_ERR
++                        ? CamerasAccessStatus::Rejected
++                        : CamerasAccessStatus::Error,
++                    "CamerasParent::RequestCameraAccess camera backend init "
++                    "reject");
++              }));
++      static nsresult clearingRv =
++          NS_DispatchToMainThread(NS_NewRunnableFunction(
++              __func__, [] { ClearOnShutdown(&sCameraAccessRequestPromise); }));
++      (void)clearingRv;
++    }
++
++    return sCameraAccessRequestPromise->Then(
++        GetCurrentSerialEventTarget(),
++        "CamerasParent::CameraAccessRequestPromise rejection handler",
++        [](CamerasAccessStatus aStatus) {
++          return CameraAccessRequestPromise::CreateAndResolve(
++              aStatus, "CamerasParent::RequestCameraAccess resolve");
++        },
++        [promise = RefPtr(sCameraAccessRequestPromise.get()),
++         aAllowPermissionRequest, aRequestCamera,
++         aRequestMicrophone](void_t aRv) {
++          if (promise == sCameraAccessRequestPromise) {
++            sCameraAccessRequestPromise = nullptr;
++            return CameraAccessRequestPromise::CreateAndResolve(
++                CamerasAccessStatus::Error,
++                "CamerasParent::RequestCameraAccess reject");
++          }
++          return CamerasParent::RequestCameraAccess(
++              aAllowPermissionRequest, aRequestCamera, aRequestMicrophone);
++        });
++  };
++
++#ifdef MOZ_WIDGET_UIKIT
++  return RequestAVCaptureAccess(aRequestCamera, aRequestMicrophone)
++      ->Then(
++          GetCurrentSerialEventTarget(), __func__,
++          [requestCameraBackendAccess](CamerasAccessStatus aStatus) {
++            if (aStatus != CamerasAccessStatus::Granted) {
+               return CameraAccessRequestPromise::CreateAndResolve(
+-                  CamerasAccessStatus::Granted,
+-                  "CamerasParent::RequestCameraAccess camera backend init "
++                  aStatus,
++                  "CamerasParent::RequestCameraAccess AV capture access "
+                   "resolve");
+-            },
+-            [](nsresult aRv) mutable {
+-              MOZ_ASSERT(NS_FAILED(aRv));
+-              return CameraAccessRequestPromise::CreateAndResolve(
+-                  aRv == NS_ERROR_DOM_MEDIA_NOT_ALLOWED_ERR
+-                      ? CamerasAccessStatus::Rejected
+-                      : CamerasAccessStatus::Error,
+-                  "CamerasParent::RequestCameraAccess camera backend init "
+-                  "reject");
+-            }));
+-    static nsresult clearingRv = NS_DispatchToMainThread(NS_NewRunnableFunction(
+-        __func__, [] { ClearOnShutdown(&sCameraAccessRequestPromise); }));
+-    (void)clearingRv;
+-  }
+-
+-  // If camera acess is granted, all is jolly. But we need to handle rejection.
+-  return sCameraAccessRequestPromise->Then(
+-      GetCurrentSerialEventTarget(),
+-      "CamerasParent::CameraAccessRequestPromise rejection handler",
+-      [](CamerasAccessStatus aStatus) {
+-        return CameraAccessRequestPromise::CreateAndResolve(
+-            aStatus, "CamerasParent::RequestCameraAccess resolve");
+-      },
+-      [promise = RefPtr(sCameraAccessRequestPromise.get()),
+-       aAllowPermissionRequest](void_t aRv) {
+-        if (promise == sCameraAccessRequestPromise) {
+-          sCameraAccessRequestPromise = nullptr;
+-          return CameraAccessRequestPromise::CreateAndResolve(
+-              CamerasAccessStatus::Error,
+-              "CamerasParent::RequestCameraAccess reject");
+-        }
+-        return CamerasParent::RequestCameraAccess(aAllowPermissionRequest);
+-      });
++            }
++            return requestCameraBackendAccess();
++          },
++          [](nsresult) {
++            return CameraAccessRequestPromise::CreateAndResolve(
++                CamerasAccessStatus::Error,
++                "CamerasParent::RequestCameraAccess AV capture access "
++                "reject");
++          });
++#else
++  return requestCameraBackendAccess();
++#endif
+ }
+ 
+ // RecvPCamerasConstructor() is used because IPC messages, for

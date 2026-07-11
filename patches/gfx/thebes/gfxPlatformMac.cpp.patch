@@ -1,0 +1,38 @@
+diff --git a/gfx/thebes/gfxPlatformMac.cpp b/gfx/thebes/gfxPlatformMac.cpp
+index 3fb9d63e1227..981df0392497 100644
+--- a/gfx/thebes/gfxPlatformMac.cpp
++++ b/gfx/thebes/gfxPlatformMac.cpp
+@@ -21,6 +21,8 @@
+ #include "mozilla/VsyncDispatcher.h"
+ #ifdef MOZ_WIDGET_COCOA
+ #  include "nsCocoaFeatures.h"
++#else
++#  include "gfxUIKitVsyncSource.h"
+ #endif
+ #include "nsComponentManagerUtils.h"
+ #include "nsIFile.h"
+@@ -1028,8 +1030,22 @@ gfxPlatformMac::CreateGlobalHardwareVsyncSource() {
+   osxVsyncSource->DisableVsync();
+   return osxVsyncSource.forget();
+ #else
+-  // TODO: CADisplayLink
+-  return GetSoftwareVsyncSource();
++  RefPtr<VsyncSource> uikitVsyncSource = CreateUIKitVsyncSource();
++  if (!uikitVsyncSource) {
++    gfxWarning()
++        << "UIKit Vsync source not created. Falling back to software vsync.";
++    return GetSoftwareVsyncSource();
++  }
++
++  uikitVsyncSource->EnableVsync();
++  if (!uikitVsyncSource->IsVsyncEnabled()) {
++    gfxWarning()
++        << "UIKit Vsync source not enabled. Falling back to software vsync.";
++    return GetSoftwareVsyncSource();
++  }
++
++  uikitVsyncSource->DisableVsync();
++  return uikitVsyncSource.forget();
+ #endif
+ }
+ 

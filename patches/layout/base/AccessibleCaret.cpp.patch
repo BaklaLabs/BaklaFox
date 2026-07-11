@@ -1,0 +1,30 @@
+diff --git a/layout/base/AccessibleCaret.cpp b/layout/base/AccessibleCaret.cpp
+index 68d751bf8006..770135554c4d 100644
+--- a/layout/base/AccessibleCaret.cpp
++++ b/layout/base/AccessibleCaret.cpp
+@@ -38,6 +38,7 @@ NS_IMPL_ISUPPORTS(AccessibleCaret::DummyTouchListener, nsIDOMEventListener)
+ 
+ static constexpr auto kTextOverlayElementId = u"text-overlay"_ns;
+ static constexpr auto kCaretImageElementId = u"image"_ns;
++static constexpr auto kNativeSelectionClass = u"hidden-for-native-selection"_ns;
+ 
+ #define AC_PROCESS_ENUM_TO_STREAM(e) \
+   case (e):                          \
+@@ -119,6 +120,17 @@ void AccessibleCaret::SetAppearance(Appearance aAppearance) {
+   }
+ }
+ 
++void AccessibleCaret::SetVisuallyHiddenForNativeSelection(bool aHidden) {
++  IgnoredErrorResult rv;
++  if (aHidden) {
++    CaretElement().ClassList()->Add(kNativeSelectionClass, rv);
++    MOZ_ASSERT(!rv.Failed(), "Add native selection class failed!");
++  } else {
++    CaretElement().ClassList()->Remove(kNativeSelectionClass, rv);
++    MOZ_ASSERT(!rv.Failed(), "Remove native selection class failed!");
++  }
++}
++
+ /* static */
+ nsAutoString AccessibleCaret::AppearanceString(Appearance aAppearance) {
+   nsAutoString string;

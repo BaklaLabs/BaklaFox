@@ -1,0 +1,67 @@
+diff --git a/js/src/jit/ProcessExecutableMemory.h b/js/src/jit/ProcessExecutableMemory.h
+index 4a08d4a6238f..e81f640ac22f 100644
+--- a/js/src/jit/ProcessExecutableMemory.h
++++ b/js/src/jit/ProcessExecutableMemory.h
+@@ -7,9 +7,7 @@
+ 
+ #include "util/Poison.h"
+ 
+-#ifdef XP_IOS
+-#  include <BrowserEngineCore/BEMemory.h>
+-#endif
++struct JITRuntimeInfo;
+ 
+ namespace js {
+ namespace jit {
+@@ -77,10 +75,26 @@ enum class MustFlushICache { No, Yes };
+                                           ProtectionSetting protection,
+                                           MustFlushICache flushICache);
+ 
++[[nodiscard]] extern void* WritableJitAllocationFromExecutable(void* start,
++                                                               size_t size);
++
++template <typename T>
++[[nodiscard]] inline T* WritableJitAllocationFromExecutable(T* start,
++                                                            size_t size) {
++  return static_cast<T*>(
++      WritableJitAllocationFromExecutable(static_cast<void*>(start), size));
++}
++
++template <typename T>
++[[nodiscard]] inline T* WritableJitAllocationFromExecutable(T* start) {
++  return WritableJitAllocationFromExecutable(start, sizeof(T));
++}
++
+ // Functions called at process start-up/shutdown to initialize/release the
+ // executable memory region.
+ [[nodiscard]] extern bool InitProcessExecutableMemory();
+ extern void ReleaseProcessExecutableMemory();
++extern void SetJITRuntimeInfo(const JITRuntimeInfo& aRuntimeInfo);
+ 
+ // Allocate/deallocate executable pages.
+ extern void* AllocateExecutableMemory(size_t bytes,
+@@ -123,22 +137,14 @@ class MOZ_RAII AutoMarkJitCodeWritableForThread {
+ 
+  public:
+   MOZ_ALWAYS_INLINE_EVEN_DEBUG AutoMarkJitCodeWritableForThread() {
+-#if defined(JS_USE_APPLE_FAST_WX)
+-#  if defined(XP_IOS)
+-    be_memory_inline_jit_restrict_rwx_to_rw_with_witness();
+-#  else
++#if defined(JS_USE_APPLE_FAST_WX) && !defined(XP_IOS)
+     markExecutable(false);
+-#  endif
+ #endif
+     checkConstructor();
+   }
+   MOZ_ALWAYS_INLINE_EVEN_DEBUG ~AutoMarkJitCodeWritableForThread() {
+-#if defined(JS_USE_APPLE_FAST_WX)
+-#  if defined(XP_IOS)
+-    be_memory_inline_jit_restrict_rwx_to_rx_with_witness();
+-#  else
++#if defined(JS_USE_APPLE_FAST_WX) && !defined(XP_IOS)
+     markExecutable(true);
+-#  endif
+ #endif
+     checkDestructor();
+   }

@@ -1,0 +1,37 @@
+diff --git a/mobile/shared/modules/geckoview/Messaging.sys.mjs b/mobile/shared/modules/geckoview/Messaging.sys.mjs
+index 7b0eabc36a7a..f6e288604cce 100644
+--- a/mobile/shared/modules/geckoview/Messaging.sys.mjs
++++ b/mobile/shared/modules/geckoview/Messaging.sys.mjs
+@@ -2,8 +2,10 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+-if (Services.appinfo.processType != Services.appinfo.PROCESS_TYPE_DEFAULT) {
+-  throw new Error("EventDispatcher is only available in the parent process");
++function ensureParentProcess() {
++  if (Services.appinfo.processType != Services.appinfo.PROCESS_TYPE_DEFAULT) {
++    throw new Error("EventDispatcher is only available in the parent process");
++  }
+ }
+ 
+ function DispatcherDelegate(aDispatcher) {
+@@ -88,7 +90,10 @@ DispatcherDelegate.prototype = {
+ };
+ 
+ export var EventDispatcher = {
+-  instance: new DispatcherDelegate(Services.geckoviewBridge),
++  get instance() {
++    ensureParentProcess();
++    return new DispatcherDelegate(Services.geckoviewBridge);
++  },
+ 
+   /**
+    * Return an EventDispatcher instance for a chrome DOM window.
+@@ -114,6 +119,7 @@ export var EventDispatcher = {
+    * corresponding EventDispatcher on the java side.
+    */
+   byName(aName) {
++    ensureParentProcess();
+     const dispatcher = Services.geckoviewBridge.getDispatcherByName(aName);
+     return new DispatcherDelegate(dispatcher);
+   },

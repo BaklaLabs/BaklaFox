@@ -1,0 +1,26 @@
+diff --git a/widget/uikit/nsWidgetFactory.mm b/widget/uikit/nsWidgetFactory.mm
+index 25d89f7bbbac..86585b973084 100644
+--- a/widget/uikit/nsWidgetFactory.mm
++++ b/widget/uikit/nsWidgetFactory.mm
+@@ -13,13 +13,20 @@
+ #include "nsAppShellSingleton.h"
+ #include "nsLookAndFeel.h"
+ 
++#include "nsClipboard.h"
+ #include "HeadlessClipboard.h"
++#include "gfxPlatform.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::widget;
+ 
+ NS_IMPL_COMPONENT_FACTORY(nsIClipboard) {
+-  nsCOMPtr<nsIClipboard> inst = new HeadlessClipboard();
++  nsCOMPtr<nsIClipboard> inst;
++  if (gfxPlatform::IsHeadless()) {
++    inst = new HeadlessClipboard();
++  } else {
++    inst = new nsClipboard();
++  }
+ 
+   return inst.forget();
+ }

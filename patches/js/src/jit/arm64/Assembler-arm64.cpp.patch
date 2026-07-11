@@ -1,0 +1,274 @@
+diff --git a/js/src/jit/arm64/Assembler-arm64.cpp b/js/src/jit/arm64/Assembler-arm64.cpp
+index f8296d72e32c..2028ed4edb3e 100644
+--- a/js/src/jit/arm64/Assembler-arm64.cpp
++++ b/js/src/jit/arm64/Assembler-arm64.cpp
+@@ -13,9 +13,14 @@
+ #include "jit/arm64/vixl/Disasm-vixl.h"
+ #include "jit/AutoWritableJitCode.h"
+ #include "jit/ExecutableAllocator.h"
++#include "jit/FlushICache.h"
+ #include "vm/Realm.h"
+ #include "wasm/WasmFrame.h"
+ 
++#ifdef XP_IOS
++#  include <libkern/OSCacheControl.h>
++#endif
++
+ #include "gc/StoreBuffer-inl.h"
+ 
+ using namespace js;
+@@ -23,6 +28,16 @@ using namespace js::jit;
+ 
+ using mozilla::DebugOnly;
+ 
++// REYNARD: Late arm64 JIT patches can update instructions and literal pools
++// through the writable alias while the executable mapping stays live. Refresh
++// the executable view so subsequent indirect jumps see the patched targets.
++static void FinalizeExecutablePatch(void* address, size_t size) {
++  FlushICache(address, size);
++#ifdef XP_IOS
++  sys_cache_control(kCacheFunctionPrepareForExecution, address, size);
++#endif
++}
++
+ ABIArg ABIArgGenerator::next(MIRType type) {
+   switch (type) {
+     case MIRType::Int32:
+@@ -170,8 +185,11 @@ BufferOffset Assembler::emitExtendedJumpTable() {
+ }
+ 
+ void Assembler::executableCopy(uint8_t* buffer) {
++  uint8_t* writableBuffer =
++      WritableJitAllocationFromExecutable(buffer, bytesNeeded());
++
+   // Copy the code and all constant pools into the output buffer.
+-  armbuffer_.executableCopy(buffer);
++  armbuffer_.executableCopy(writableBuffer);
+ 
+   // Patch any relative jumps that target code outside the buffer.
+   // The extended jump table may be used for distant jumps.
+@@ -180,16 +198,30 @@ void Assembler::executableCopy(uint8_t* buffer) {
+     MOZ_ASSERT(rp.target);
+ 
+     Instruction* target = (Instruction*)rp.target;
+-    Instruction* branch = (Instruction*)(buffer + rp.offset.getOffset());
+-    JumpTableEntry* extendedJumpTable = reinterpret_cast<JumpTableEntry*>(
++    Instruction* executableBranch =
++        (Instruction*)(buffer + rp.offset.getOffset());
++    Instruction* writableBranch =
++        (Instruction*)(writableBuffer + rp.offset.getOffset());
++    JumpTableEntry* executableJumpTable = reinterpret_cast<JumpTableEntry*>(
+         buffer + ExtendedJumpTable_.getOffset());
+-    if (branch->BranchType() != vixl::UnknownBranchType) {
+-      if (branch->IsTargetReachable(target)) {
+-        branch->SetImmPCOffsetTarget(target);
++    JumpTableEntry* writableJumpTable = reinterpret_cast<JumpTableEntry*>(
++        writableBuffer + ExtendedJumpTable_.getOffset());
++    if (executableBranch->BranchType() != vixl::UnknownBranchType) {
++      if (executableBranch->IsTargetReachable(target)) {
++        ptrdiff_t relTarget = target - executableBranch;
++        ptrdiff_t relTarget00 = relTarget >> 2;
++        MOZ_RELEASE_ASSERT((relTarget & 0x3) == 0);
++        MOZ_RELEASE_ASSERT(vixl::IsInt26(relTarget00));
++        b(writableBranch, relTarget00);
+       } else {
+-        JumpTableEntry* entry = &extendedJumpTable[i];
+-        branch->SetImmPCOffsetTarget(entry->getLdr());
+-        entry->data = target;
++        JumpTableEntry* executableEntry = &executableJumpTable[i];
++        JumpTableEntry* writableEntry = &writableJumpTable[i];
++        ptrdiff_t relTarget = executableEntry->getLdr() - executableBranch;
++        ptrdiff_t relTarget00 = relTarget >> 2;
++        MOZ_RELEASE_ASSERT((relTarget & 0x3) == 0);
++        MOZ_RELEASE_ASSERT(vixl::IsInt26(relTarget00));
++        b(writableBranch, relTarget00);
++        writableEntry->data = target;
+       }
+     } else {
+       // Currently a two-instruction call, it should be possible to optimize
+@@ -197,6 +229,12 @@ void Assembler::executableCopy(uint8_t* buffer) {
+       // will work.
+     }
+   }
++
++  // REYNARD: On iOS, the initial executable copy and its pending jump fixups
++  // happen through the writable alias. Refresh the executable mapping once the
++  // whole buffer is finalized so hardcoded branches don't execute recycled
++  // stale targets from a previous allocation.
++  FinalizeExecutablePatch(buffer, bytesNeeded());
+ }
+ 
+ BufferOffset Assembler::immPool(ARMRegister dest, uint8_t* value,
+@@ -315,22 +353,27 @@ void Assembler::addPendingJump(BufferOffset src, ImmPtr target,
+ 
+ void Assembler::PatchWrite_NearCall(CodeLocationLabel start,
+                                     CodeLocationLabel toCall) {
+-  Instruction* dest = (Instruction*)start.raw();
+-  ptrdiff_t relTarget = (Instruction*)toCall.raw() - dest;
++  Instruction* executableDest = (Instruction*)start.raw();
++  Instruction* dest = WritableJitAllocationFromExecutable(executableDest);
++  ptrdiff_t relTarget = (Instruction*)toCall.raw() - executableDest;
+   ptrdiff_t relTarget00 = relTarget >> 2;
+   MOZ_RELEASE_ASSERT((relTarget & 0x3) == 0);
+   MOZ_RELEASE_ASSERT(vixl::IsInt26(relTarget00));
+ 
+   bl(dest, relTarget00);
++  FinalizeExecutablePatch(executableDest, vixl::kInstructionSize);
+ }
+ 
+ void Assembler::PatchDataWithValueCheck(CodeLocationLabel label,
+                                         PatchedImmPtr newValue,
+                                         PatchedImmPtr expected) {
+-  Instruction* i = (Instruction*)label.raw();
+-  void** pValue = i->LiteralAddress<void**>();
++  Instruction* executableInstruction = (Instruction*)label.raw();
++  void** pValue = WritableJitAllocationFromExecutable(
++      executableInstruction->LiteralAddress<void**>());
+   MOZ_ASSERT(*pValue == expected.value);
+   *pValue = newValue.value;
++  FinalizeExecutablePatch(executableInstruction->LiteralAddress<void*>(),
++                          sizeof(void*));
+ }
+ 
+ void Assembler::PatchDataWithValueCheck(CodeLocationLabel label,
+@@ -340,21 +383,24 @@ void Assembler::PatchDataWithValueCheck(CodeLocationLabel label,
+ }
+ 
+ void Assembler::ToggleToJmp(CodeLocationLabel inst_) {
+-  Instruction* i = (Instruction*)inst_.raw();
+-  MOZ_ASSERT(i->IsAddSubImmediate());
++  Instruction* executable = (Instruction*)inst_.raw();
++  Instruction* writable = WritableJitAllocationFromExecutable(executable);
++  MOZ_ASSERT(executable->IsAddSubImmediate());
+ 
+   // Refer to instruction layout in ToggleToCmp().
+-  int imm19 = (int)i->Bits(23, 5);
++  int imm19 = (int)executable->Bits(23, 5);
+   MOZ_ASSERT(vixl::IsInt19(imm19));
+ 
+-  b(i, imm19, Always);
++  b(writable, imm19, Always);
++  FinalizeExecutablePatch(executable, vixl::kInstructionSize);
+ }
+ 
+ void Assembler::ToggleToCmp(CodeLocationLabel inst_) {
+-  Instruction* i = (Instruction*)inst_.raw();
+-  MOZ_ASSERT(i->IsCondB());
++  Instruction* executable = (Instruction*)inst_.raw();
++  Instruction* writable = WritableJitAllocationFromExecutable(executable);
++  MOZ_ASSERT(executable->IsCondB());
+ 
+-  int imm19 = i->ImmCondBranch();
++  int imm19 = executable->ImmCondBranch();
+   // bit 23 is reserved, and the simulator throws an assertion when this happens
+   // It'll be messy to decode, but we can steal bit 30 or bit 31.
+   MOZ_ASSERT(vixl::IsInt18(imm19));
+@@ -368,68 +414,80 @@ void Assembler::ToggleToCmp(CodeLocationLabel inst_) {
+   // 0:4 - Destination Register. Must be xzr.
+ 
+   // From the above, there is a safe 19-bit contiguous region from 5:23.
+-  Emit(i, vixl::ThirtyTwoBits | vixl::AddSubImmediateFixed | vixl::SUB |
+-              Flags(vixl::SetFlags) | Rd(vixl::xzr) |
+-              (imm19 << vixl::Rn_offset));
++  Emit(writable, vixl::ThirtyTwoBits | vixl::AddSubImmediateFixed |
++                     vixl::SUB | Flags(vixl::SetFlags) | Rd(vixl::xzr) |
++                     (imm19 << vixl::Rn_offset));
++  FinalizeExecutablePatch(executable, vixl::kInstructionSize);
+ }
+ 
+ void Assembler::ToggleCall(CodeLocationLabel inst_, bool enabled) {
+-  const Instruction* first = reinterpret_cast<Instruction*>(inst_.raw());
++  const Instruction* executableFirst =
++      reinterpret_cast<Instruction*>(inst_.raw());
+   Instruction* load;
+   Instruction* call;
+ 
+   // There might be a constant pool at the very first instruction.
+-  first = first->skipPool();
++  executableFirst = executableFirst->skipPool();
+ 
+   // Skip the stack pointer restore instruction.
+-  if (first->IsStackPtrSync()) {
+-    first = first->InstructionAtOffset(vixl::kInstructionSize)->skipPool();
++  if (executableFirst->IsStackPtrSync()) {
++    executableFirst =
++        executableFirst->InstructionAtOffset(vixl::kInstructionSize)->skipPool();
+   }
+ 
+-  load = const_cast<Instruction*>(first);
++  const Instruction* executableLoad = executableFirst;
++  load = WritableJitAllocationFromExecutable(
++      const_cast<Instruction*>(executableLoad));
+ 
+   // The call instruction follows the load, but there may be an injected
+   // constant pool.
+-  call = const_cast<Instruction*>(
+-      load->InstructionAtOffset(vixl::kInstructionSize)->skipPool());
++  const Instruction* executableCall = executableLoad->InstructionAtOffset(
++      vixl::kInstructionSize)->skipPool();
++  call = WritableJitAllocationFromExecutable(
++      const_cast<Instruction*>(executableCall));
+ 
+-  if (call->IsBLR() == enabled) {
++  if (executableCall->IsBLR() == enabled) {
+     return;
+   }
+ 
+-  if (call->IsBLR()) {
++  if (executableCall->IsBLR()) {
+     // If the second instruction is blr(), then we have:
+     //   ldr x17, [pc, offset]
+     //   blr x17
+-    MOZ_ASSERT(load->IsLDR());
++    MOZ_ASSERT(executableLoad->IsLDR());
+     // We want to transform this to:
+     //   adr xzr, [pc, offset]
+     //   nop
+-    int32_t offset = load->ImmLLiteral();
++    int32_t offset = executableLoad->ImmLLiteral();
+     adr(load, xzr, int32_t(offset));
+     nop(call);
+   } else {
+     // We have:
+     //   adr xzr, [pc, offset] (or ldr x17, [pc, offset])
+     //   nop
+-    MOZ_ASSERT(load->IsADR() || load->IsLDR());
+-    MOZ_ASSERT(call->IsNOP());
++    MOZ_ASSERT(executableLoad->IsADR() || executableLoad->IsLDR());
++    MOZ_ASSERT(executableCall->IsNOP());
+     // Transform this to:
+     //   ldr x17, [pc, offset]
+     //   blr x17
+-    int32_t offset = (int)load->ImmPCRawOffset();
++    int32_t offset = (int)executableLoad->ImmPCRawOffset();
+     MOZ_ASSERT(vixl::IsInt19(offset));
+     ldr(load, ScratchReg2_64, int32_t(offset));
+     blr(call, ScratchReg2_64);
+   }
++
++  FinalizeExecutablePatch(load, vixl::kInstructionSize);
++  FinalizeExecutablePatch(call, vixl::kInstructionSize);
+ }
+ 
+ // Patches loads generated by MacroAssemblerCompat::mov(CodeLabel*, Register).
+ // The loading code is implemented in movePatchablePtr().
+ void Assembler::UpdateLoad64Value(Instruction* inst0, uint64_t value) {
+   MOZ_ASSERT(inst0->IsLDR());
+-  uint64_t* literal = inst0->LiteralAddress<uint64_t*>();
++  uint64_t* literal = WritableJitAllocationFromExecutable(
++      inst0->LiteralAddress<uint64_t*>());
+   *literal = value;
++  FinalizeExecutablePatch(inst0->LiteralAddress<void*>(), sizeof(uint64_t));
+ }
+ 
+ class RelocationIterator {
+@@ -534,7 +592,8 @@ void Assembler::TraceDataRelocations(JSTracer* trc, JitCode* code,
+     // Refer to movePatchablePtr() for generation.
+     MOZ_ASSERT(load->Mask(vixl::LoadLiteralMask) == vixl::LDR_x_lit);
+ 
+-    uintptr_t* literalAddr = load->LiteralAddress<uintptr_t*>();
++    uintptr_t* literalAddr = WritableJitAllocationFromExecutable(
++      load->LiteralAddress<uintptr_t*>());
+     uintptr_t literal = *literalAddr;
+ 
+     // Data relocations can be for Values or for raw pointers. If a Value is

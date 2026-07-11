@@ -1,0 +1,15 @@
+diff --git a/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h b/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
+index 2ea501720536..5d427370785f 100644
+--- a/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
++++ b/dom/media/webrtc/transport/third_party/nICEr/src/stun/stun.h
+@@ -52,8 +52,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <netinet/in.h>
+ #ifndef LINUX
+ #include <net/if.h>
++#ifndef MOZ_WIDGET_UIKIT
+ #include <netinet/in_var.h>
+ #endif
++#endif
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #endif

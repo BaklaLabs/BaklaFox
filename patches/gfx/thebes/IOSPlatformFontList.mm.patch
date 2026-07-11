@@ -1,0 +1,75 @@
+diff --git a/gfx/thebes/IOSPlatformFontList.mm b/gfx/thebes/IOSPlatformFontList.mm
+index 6342e7e84c32..ef880deb1662 100644
+--- a/gfx/thebes/IOSPlatformFontList.mm
++++ b/gfx/thebes/IOSPlatformFontList.mm
+@@ -3,16 +3,69 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #import <UIKit/UIKit.h>
++#include "mozilla/FontPropertyTypes.h"
+ #include "IOSPlatformFontList.h"
+ 
+ IOSPlatformFontList::IOSPlatformFontList() : CoreTextFontList() {}
+ 
+ IOSPlatformFontList::~IOSPlatformFontList() {}
+ 
++static UIFont* GetUIFontForSystemFontID(
++    mozilla::LookAndFeel::FontID aSystemFontID) {
++  switch (aSystemFontID) {
++    case mozilla::LookAndFeel::FontID::SmallCaption:
++      return [UIFont boldSystemFontOfSize:12.0];
++
++    case mozilla::LookAndFeel::FontID::MessageBox:
++    case mozilla::LookAndFeel::FontID::MozList:
++    case mozilla::LookAndFeel::FontID::MozField:
++    case mozilla::LookAndFeel::FontID::MozButton:
++      return [UIFont systemFontOfSize:13.0];
++
++    case mozilla::LookAndFeel::FontID::StatusBar:
++      return [UIFont systemFontOfSize:17.0];
++
++    case mozilla::LookAndFeel::FontID::Icon:
++    case mozilla::LookAndFeel::FontID::Caption:
++    case mozilla::LookAndFeel::FontID::Menu:
++    case mozilla::LookAndFeel::FontID::MozPullDownMenu:
++    default:
++      return [UIFont systemFontOfSize:14.0];
++  }
++}
++
++static void FillStyleFromUIFont(UIFont* aFont, gfxFontStyle& aFontStyle) {
++  UIFontDescriptor* descriptor = aFont.fontDescriptor;
++  UIFontDescriptorSymbolicTraits traits = descriptor.symbolicTraits;
++  NSDictionary<UIFontDescriptorTraitKey, id>* traitValues =
++      [descriptor objectForKey:UIFontDescriptorTraitsAttribute];
++  NSNumber* widthTrait = [traitValues objectForKey:UIFontWidthTrait];
++
++  aFontStyle.style = (traits & UIFontDescriptorTraitItalic)
++                         ? mozilla::FontSlantStyle::ITALIC
++                         : mozilla::FontSlantStyle::NORMAL;
++  aFontStyle.weight = (traits & UIFontDescriptorTraitBold)
++                          ? mozilla::FontWeight::BOLD
++                          : mozilla::FontWeight::NORMAL;
++
++  float width = widthTrait ? widthTrait.floatValue : 0.0f;
++  aFontStyle.stretch = width > 0.1f    ? mozilla::FontStretch::EXPANDED
++                       : width < -0.1f ? mozilla::FontStretch::CONDENSED
++                                       : mozilla::FontStretch::NORMAL;
++  aFontStyle.size = aFont.pointSize;
++  aFontStyle.systemFont = true;
++}
++
+ void IOSPlatformFontList::LookupSystemFont(
+     mozilla::LookAndFeel::FontID aSystemFontID, nsACString& aSystemFontName,
+     gfxFontStyle& aFontStyle) {
+-  MOZ_CRASH("UNIMPLEMENTED");
++  // REYNARD: iOS system font lookup through UIKit and report the family as
++  // -apple-system
++  UIFont* font = GetUIFontForSystemFontID(aSystemFontID);
++  MOZ_ASSERT(font, "system font not set");
++
++  aSystemFontName.AssignASCII("-apple-system");
++  FillStyleFromUIFont(font, aFontStyle);
+ }
+ 
+ nsTArray<std::pair<const char**, uint32_t>>

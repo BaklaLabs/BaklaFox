@@ -1,0 +1,26 @@
+diff --git a/netwerk/system/ios/moz.build b/netwerk/system/ios/moz.build
+index 233ac534d03c..2c81f6a9fbd6 100644
+--- a/netwerk/system/ios/moz.build
++++ b/netwerk/system/ios/moz.build
+@@ -3,7 +3,20 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ SOURCES += [
+-    "nsNetworkLinkServiceIOS.mm",
++    "nsIOSNetworkLinkService.mm",
++]
++
++SOURCES["nsIOSNetworkLinkService.mm"].flags += ["-fblocks"]
++
++LOCAL_INCLUDES += [
++    "/netwerk/base",
++    "/netwerk/dns",
++    "/netwerk/system",
++]
++
++OS_LIBS += [
++    "-framework CFNetwork",
++    "-framework Network",
+ ]
+ 
+ FINAL_LIBRARY = "xul"

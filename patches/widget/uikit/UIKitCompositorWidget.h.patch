@@ -1,0 +1,63 @@
+diff --git a/widget/uikit/UIKitCompositorWidget.h b/widget/uikit/UIKitCompositorWidget.h
+new file mode 100644
+index 000000000000..b064053ad91f
+--- /dev/null
++++ b/widget/uikit/UIKitCompositorWidget.h
+@@ -0,0 +1,57 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef mozilla_widget_UIKitCompositorWidget_h
++#define mozilla_widget_UIKitCompositorWidget_h
++
++#include "CompositorWidget.h"
++#include "mozilla/ipc/Endpoint.h"
++#include "mozilla/layers/NativeLayer.h"
++
++namespace mozilla {
++namespace layers {
++class PNativeLayerRemoteChild;
++}
++namespace widget {
++
++class PlatformCompositorWidgetDelegate : public CompositorWidgetDelegate {
++ public:
++  virtual void NotifyClientSizeChanged(
++      const LayoutDeviceIntSize& aClientSize) = 0;
++
++  PlatformCompositorWidgetDelegate* AsPlatformSpecificDelegate() override {
++    return this;
++  }
++};
++
++class UIKitCompositorWidget : public CompositorWidget {
++ public:
++  explicit UIKitCompositorWidget(const layers::CompositorOptions& aOptions);
++  ~UIKitCompositorWidget() override;
++
++  virtual void Init(CompositorWidgetInitData&& aInitData);
++
++  layers::NativeLayerRoot* GetNativeLayerRoot() override;
++
++  LayoutDeviceIntSize GetClientSize() override;
++
++  void NotifyClientSizeChanged(const LayoutDeviceIntSize& aClientSize);
++
++ protected:
++  LayoutDeviceIntSize mClientSize;
++  ipc::Endpoint<mozilla::layers::PNativeLayerRemoteChild> mChildEndpoint;
++
++ private:
++  void CreateNativeLayerRoot();
++
++  RefPtr<layers::NativeLayerRoot> mNativeLayerRoot;
++};
++
++}  // namespace widget
++}  // namespace mozilla
++
++#endif  // mozilla_widget_UIKitCompositorWidget_h

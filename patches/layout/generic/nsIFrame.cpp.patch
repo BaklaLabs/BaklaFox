@@ -1,0 +1,31 @@
+diff --git a/layout/generic/nsIFrame.cpp b/layout/generic/nsIFrame.cpp
+index 7c855f65ac11..7f6e6accdaff 100644
+--- a/layout/generic/nsIFrame.cpp
++++ b/layout/generic/nsIFrame.cpp
+@@ -4914,7 +4914,26 @@ bool nsIFrame::IsSelectable(StyleUserSelect* aSelectStyle) const {
+   return style != StyleUserSelect::None;
+ }
+ 
++static bool IsInEditableTextSelectionContext(const nsIFrame* aFrame) {
++  for (const nsIFrame* frame = aFrame; frame; frame = frame->GetParent()) {
++    if (frame->IsTextInputFrame() || frame->ContentIsEditable()) {
++      return true;
++    }
++    if (frame->Style()->GetPseudoType() ==
++        PseudoStyleType::MozTextControlEditingRoot) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ bool nsIFrame::ShouldPaintNormalSelection() const {
++#if defined(XP_IOS)
++  if (IsInEditableTextSelectionContext(this)) {
++    return false;
++  }
++#endif
++
+   if (IsSelectable()) {
+     // NOTE: Ideally, we should return false if display selection is "OFF".
+     // However, here is a hot path at painting.  Therefore, it should be checked

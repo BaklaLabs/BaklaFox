@@ -1,0 +1,195 @@
+diff --git a/mobile/shared/components/geckoview/GeckoViewPrompt.sys.mjs b/mobile/shared/components/geckoview/GeckoViewPrompt.sys.mjs
+index e195b48ca75b..c8af414e3504 100644
+--- a/mobile/shared/components/geckoview/GeckoViewPrompt.sys.mjs
++++ b/mobile/shared/components/geckoview/GeckoViewPrompt.sys.mjs
+@@ -73,6 +73,17 @@ export class PromptFactory {
+     }
+ 
+     const type = target.type;
++    if (type === "color") {
++      this._handleColor(target);
++      aEvent.preventDefault();
++      return;
++    }
++    if (type === "date" || type === "datetime-local") {
++      this._handleDateTime(target);
++      target.blur();
++      aEvent.preventDefault();
++      return;
++    }
+     if (type === "month" || type === "week") {
+       // TODO(bug 888320, bug 1283382, bug 1283383): Remove this once we
+       // support UA widgets for month/week inputs.
+@@ -82,7 +93,7 @@ export class PromptFactory {
+   }
+ 
+   _generateSelectItems(aElement) {
+-    const win = aElement.documentGlobal;
++    const win = aElement.ownerGlobal || aElement.documentGlobal;
+     let id = 0;
+     const map = {};
+ 
+@@ -119,7 +130,7 @@ export class PromptFactory {
+   }
+ 
+   _handleSelect(aElement, aIsDropDown) {
+-    const win = aElement.documentGlobal;
++    const win = aElement.ownerGlobal || aElement.documentGlobal;
+     const [items] = this._generateSelectItems(aElement);
+ 
+     if (aIsDropDown) {
+@@ -160,11 +171,22 @@ export class PromptFactory {
+       mozSystemGroup: true,
+     });
+ 
++    const elemRect = aElement.getBoundingClientRect();
++    const winUtils = win.windowUtils;
++    const screenRect = winUtils.toScreenRectInCSSUnits(
++      elemRect.left, elemRect.top, elemRect.width, elemRect.height
++    );
+     prompt.asyncShowPrompt(
+       {
+         type: "choice",
+         mode: aElement.multiple ? "multiple" : "single",
+         choices: items,
++        rect: {
++          left: screenRect.left,
++          top: screenRect.top,
++          width: screenRect.width,
++          height: screenRect.height,
++        },
+       },
+       result => {
+         deferredUpdate.disarm();
+@@ -229,28 +251,38 @@ export class PromptFactory {
+   }
+ 
+   _handleDateTime(aElement) {
+-    const win = aElement.documentGlobal;
++    const win = aElement.ownerGlobal || aElement.documentGlobal;
++    const elemRect = aElement.getBoundingClientRect();
++    const winUtils = win.windowUtils;
++    const screenRect = winUtils.toScreenRectInCSSUnits(
++      elemRect.left,
++      elemRect.top,
++      elemRect.width,
++      elemRect.height
++    );
+     const prompt = new lazy.GeckoViewPrompter(win);
+ 
+     const chromeEventHandler =
+       aElement.documentGlobal.docShell.chromeEventHandler;
+     const dismissPrompt = () => prompt.dismiss();
+-    // Some controls don't have UA widget (bug 888320)
++
++    // REYNARD: If the input has a UA widget (dateTimeBoxElement), notify it that the
++    // picker is open. Otherwise (called from click before UA widget renders,
++    // or for types without UA widgets) use a blur listener instead.
+     {
+       const dateTimeBoxElement = aElement.dateTimeBoxElement;
+-      if (["month", "week"].includes(aElement.type) && !dateTimeBoxElement) {
+-        aElement.addEventListener("blur", dismissPrompt, {
+-          mozSystemGroup: true,
+-        });
+-      } else {
++      if (dateTimeBoxElement) {
+         chromeEventHandler.addEventListener(
+           "MozCloseDateTimePicker",
+           dismissPrompt
+         );
+-
+         dateTimeBoxElement.dispatchEvent(
+           new win.CustomEvent("MozSetDateTimePickerState", { detail: true })
+         );
++      } else {
++        aElement.addEventListener("blur", dismissPrompt, {
++          mozSystemGroup: true,
++        });
+       }
+     }
+ 
+@@ -262,15 +294,16 @@ export class PromptFactory {
+         min: aElement.min,
+         max: aElement.max,
+         step: aElement.step,
++        rect: {
++          left: screenRect.left,
++          top: screenRect.top,
++          width: screenRect.width,
++          height: screenRect.height,
++        },
+       },
+       result => {
+-        // Some controls don't have UA widget (bug 888320)
+         const dateTimeBoxElement = aElement.dateTimeBoxElement;
+-        if (["month", "week"].includes(aElement.type) && !dateTimeBoxElement) {
+-          aElement.removeEventListener("blur", dismissPrompt, {
+-            mozSystemGroup: true,
+-          });
+-        } else {
++        if (dateTimeBoxElement) {
+           chromeEventHandler.removeEventListener(
+             "MozCloseDateTimePicker",
+             dismissPrompt
+@@ -278,6 +311,10 @@ export class PromptFactory {
+           dateTimeBoxElement.dispatchEvent(
+             new win.CustomEvent("MozSetDateTimePickerState", { detail: false })
+           );
++        } else {
++          aElement.removeEventListener("blur", dismissPrompt, {
++            mozSystemGroup: true,
++          });
+         }
+ 
+         // OK: result
+@@ -295,6 +332,50 @@ export class PromptFactory {
+     );
+   }
+ 
++  _handleColor(aElement) {
++    const win = aElement.ownerGlobal || aElement.documentGlobal;
++    const elemRect = aElement.getBoundingClientRect();
++    const winUtils = win.windowUtils;
++    const screenRect = winUtils.toScreenRectInCSSUnits(
++      elemRect.left,
++      elemRect.top,
++      elemRect.width,
++      elemRect.height
++    );
++
++    const prompt = new lazy.GeckoViewPrompter(win);
++    aElement.addEventListener(
++      "blur",
++      () => prompt.dismiss(),
++      { mozSystemGroup: true, once: true }
++    );
++
++    prompt.asyncShowPrompt(
++      {
++        type: "color",
++        title: "",
++        value: aElement.value || "#000000",
++        predefinedValues: [],
++        rect: {
++          left: screenRect.left,
++          top: screenRect.top,
++          width: screenRect.width,
++          height: screenRect.height,
++        },
++      },
++      result => {
++        if (!result || !result.color) {
++          return;
++        }
++        if (result.color === aElement.value) {
++          return;
++        }
++        aElement.value = result.color;
++        this._dispatchEvents(aElement);
++      }
++    );
++  }
++
+   _dispatchEvents(aElement) {
+     // Fire both "input" and "change" events for <select> and <input> for
+     // date/time.

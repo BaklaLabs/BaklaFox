@@ -1,0 +1,51 @@
+diff --git a/widget/uikit/CompositorWidgetChild.h b/widget/uikit/CompositorWidgetChild.h
+new file mode 100644
+index 000000000000..ff24f0a7b507
+--- /dev/null
++++ b/widget/uikit/CompositorWidgetChild.h
+@@ -0,0 +1,45 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef widget_uikit_CompositorWidgetChild_h
++#define widget_uikit_CompositorWidgetChild_h
++
++#include "UIKitCompositorWidget.h"
++#include "mozilla/widget/CompositorWidgetVsyncObserver.h"
++#include "mozilla/widget/PCompositorWidgetChild.h"
++
++namespace mozilla {
++namespace widget {
++
++class CompositorWidgetChild final : public PCompositorWidgetChild,
++                                    public PlatformCompositorWidgetDelegate {
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(CompositorWidgetChild, override)
++
++ public:
++  CompositorWidgetChild(RefPtr<CompositorVsyncDispatcher> aVsyncDispatcher,
++                        RefPtr<CompositorWidgetVsyncObserver> aVsyncObserver,
++                        const CompositorWidgetInitData& aInitData);
++
++  bool Initialize(const layers::CompositorOptions& aOptions);
++  void Shutdown();
++
++  mozilla::ipc::IPCResult RecvObserveVsync() override;
++  mozilla::ipc::IPCResult RecvUnobserveVsync() override;
++
++  void NotifyClientSizeChanged(const LayoutDeviceIntSize& aClientSize) override;
++
++ private:
++  ~CompositorWidgetChild() override;
++
++  RefPtr<CompositorVsyncDispatcher> mVsyncDispatcher;
++  RefPtr<CompositorWidgetVsyncObserver> mVsyncObserver;
++};
++
++}  // namespace widget
++}  // namespace mozilla
++
++#endif  // widget_uikit_CompositorWidgetChild_h

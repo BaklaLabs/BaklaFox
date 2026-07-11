@@ -1,0 +1,49 @@
+diff --git a/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
+index c850b03ad280..fa4689abf2ad 100644
+--- a/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
++++ b/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
+@@ -14,6 +14,7 @@ export class GeckoViewContent extends GeckoViewModule {
+       "GeckoView:HasCookieBannerRuleForBrowsingContextTree",
+       "GeckoView:RestoreState",
+       "GeckoView:ContainsFormData",
++      "GeckoView:GetFocusedInputMetrics",
+       "GeckoView:ProcessBackPressed",
+       "GeckoView:ScrollBy",
+       "GeckoView:ScrollTo",
+@@ -279,6 +280,9 @@ export class GeckoViewContent extends GeckoViewModule {
+       case "GeckoView:ContainsFormData":
+         this._containsFormData(aCallback);
+         break;
++      case "GeckoView:GetFocusedInputMetrics":
++        this._getFocusedInputMetrics(aCallback);
++        break;
+       case "GeckoView:GetWebCompatInfo":
+         this._getWebCompatInfo(aCallback);
+         break;
+@@ -455,6 +459,26 @@ export class GeckoViewContent extends GeckoViewModule {
+     aCallback.onSuccess(await this.actor.containsFormData());
+   }
+ 
++  async _getFocusedInputMetrics(aCallback) {
++    try {
++      if (this.window.windowUtils.isMozAfterPaintPending) {
++        await new Promise(resolve => {
++          this.window.addEventListener("MozAfterPaint", resolve, {
++            capture: true,
++            once: true,
++          });
++        });
++      }
++      const actor =
++        Services.focus.focusedContentBrowsingContext?.currentWindowGlobal?.getActor(
++          "GeckoViewContent"
++        );
++      aCallback.onSuccess(actor ? await actor.sendQuery("GetFocusedInputMetrics") : null);
++    } catch (error) {
++      aCallback.onError(`Cannot get focused input metrics, error: ${error}`);
++    }
++  }
++
+   async _hasCookieBannerRuleForBrowsingContextTree(aCallback) {
+     const { browsingContext } = this.actor;
+     aCallback.onSuccess(

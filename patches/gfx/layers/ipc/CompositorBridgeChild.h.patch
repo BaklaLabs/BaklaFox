@@ -1,0 +1,13 @@
+diff --git a/gfx/layers/ipc/CompositorBridgeChild.h b/gfx/layers/ipc/CompositorBridgeChild.h
+index a5f2ccbdbf0d..0bdec0b60c32 100644
+--- a/gfx/layers/ipc/CompositorBridgeChild.h
++++ b/gfx/layers/ipc/CompositorBridgeChild.h
+@@ -62,7 +62,7 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
+   /**
+    * Initialize the singleton compositor bridge for a content process.
+    */
+-  void InitForContent(uint32_t aNamespace);
++  void InitForContent(uint32_t aNamespace, uint64_t aProcessToken);
+ 
+   void InitForWidget(uint64_t aProcessToken, uint32_t aNamespace);
+ 

@@ -1,0 +1,31 @@
+diff --git a/dom/media/systemservices/CamerasChild.h b/dom/media/systemservices/CamerasChild.h
+index 70053224b1de..fdb7692d74c5 100644
+--- a/dom/media/systemservices/CamerasChild.h
++++ b/dom/media/systemservices/CamerasChild.h
+@@ -163,7 +163,7 @@ class CamerasChild final : public PCamerasChild {
+       const VideoCaptureCapability& capability) override;
+   mozilla::ipc::IPCResult RecvReplyGetCaptureDevice(
+       const nsACString& device_name, const nsACString& device_id,
+-      const bool& scary) override;
++      const bool& scary, const uint8_t& facingMode) override;
+   mozilla::ipc::IPCResult RecvReplyFailure(void) override;
+   mozilla::ipc::IPCResult RecvReplySuccess(void) override;
+   void ActorDestroy(ActorDestroyReason aWhy) override;
+@@ -192,7 +192,8 @@ class CamerasChild final : public PCamerasChild {
+                        char* device_nameUTF8,
+                        const unsigned int device_nameUTF8Length,
+                        char* unique_idUTF8,
+-                       const unsigned int unique_idUTF8Length, bool* scary);
++                       const unsigned int unique_idUTF8Length, bool* scary,
++                       uint8_t* facingMode);
+   int EnsureInitialized(CaptureEngine aCapEngine);
+ 
+   template <typename This>
+@@ -266,6 +267,7 @@ class CamerasChild final : public PCamerasChild {
+   nsCString mReplyDeviceName;
+   nsCString mReplyDeviceID;
+   bool mReplyScary;
++  uint8_t mReplyFacingMode = 0;
+   MediaEventProducer<void> mDeviceListChangeEvent;
+ };
+ 

@@ -1,0 +1,19 @@
+diff --git a/dom/media/systemservices/objc_video_capture/video_capture.mm b/dom/media/systemservices/objc_video_capture/video_capture.mm
+index 2ef4f175b0ba..324bc0ba0a2b 100644
+--- a/dom/media/systemservices/objc_video_capture/video_capture.mm
++++ b/dom/media/systemservices/objc_video_capture/video_capture.mm
+@@ -25,10 +25,14 @@
+ 
+ webrtc::scoped_refptr<VideoCaptureModule> VideoCaptureImpl::Create(
+     Clock* _Nonnull clock, const char* _Null_unspecified deviceUniqueIdUTF8) {
++#ifdef MOZ_WIDGET_UIKIT
++  return VideoCaptureAvFoundation::Create(clock, deviceUniqueIdUTF8);
++#else
+   if (StaticPrefs::media_getusermedia_camera_macavf_enabled_AtStartup()) {
+     return VideoCaptureAvFoundation::Create(clock, deviceUniqueIdUTF8);
+   }
+   return VideoCaptureIos::Create(clock, deviceUniqueIdUTF8);
++#endif
+ }
+ 
+ VideoCaptureIos::VideoCaptureIos(Clock* _Nonnull clock)

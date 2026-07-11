@@ -1,0 +1,18 @@
+CURRENT_VERSION = 0.69
+CURRENT_BUILD = 75
+
+IPHONEOS_DEPLOYMENT_TARGET = 13.0
+ARCHS = arm64
+VALID_ARCHS = arm64
+
+ENABLE_BITCODE = NO
+ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES
+
+GECKO_DIST = $(SRCROOT)/../engine/firefox/obj-aarch64-apple-ios/dist
+
+HEADER_SEARCH_PATHS = $(inherited) $(GECKO_DIST)/include/GeckoView $(SRCROOT)/GeckoView
+OTHER_CFLAGS = $(inherited) -iquote $(GECKO_DIST)/include
+LIBRARY_SEARCH_PATHS = $(inherited) $(GECKO_DIST)/bin
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(BUILT_PRODUCTS_DIR)
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks @loader_path/Frameworks
+SWIFT_OBJC_BRIDGING_HEADER = $(SRCROOT)/Reynard/Bridging/Reynard-Bridging-Header.h

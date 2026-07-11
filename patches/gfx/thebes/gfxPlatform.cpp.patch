@@ -1,0 +1,13 @@
+diff --git a/gfx/thebes/gfxPlatform.cpp b/gfx/thebes/gfxPlatform.cpp
+index 61bc156c1064..74a92a2f73f1 100644
+--- a/gfx/thebes/gfxPlatform.cpp
++++ b/gfx/thebes/gfxPlatform.cpp
+@@ -3377,7 +3377,7 @@ void gfxPlatform::InitWebGPUConfig() {
+     featureExternalTexture.Disable(FeatureStatus::Blocklisted, message.get(),
+                                    failureId);
+   }
+-#if !defined(XP_WIN) && !defined(XP_MACOSX)
++#if !defined(XP_WIN) && !defined(XP_MACOSX) && !defined(XP_IOS)
+   featureExternalTexture.ForceDisable(
+       FeatureStatus::Blocked,
+       "WebGPU external textures are not supported on this Operating System",

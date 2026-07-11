@@ -1,0 +1,13 @@
+diff --git a/layout/base/AccessibleCaret.h b/layout/base/AccessibleCaret.h
+index 9b0c33a1df1a..611abcff6bc0 100644
+--- a/layout/base/AccessibleCaret.h
++++ b/layout/base/AccessibleCaret.h
+@@ -80,6 +80,8 @@ class AccessibleCaret {
+ 
+   virtual void SetAppearance(Appearance aAppearance);
+ 
++  void SetVisuallyHiddenForNativeSelection(bool aHidden);
++
+   // Return true if current appearance is either Normal, NormalNotShown, Left,
+   // or Right.
+   bool IsLogicallyVisible() const { return mAppearance != Appearance::None; }

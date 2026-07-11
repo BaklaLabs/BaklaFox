@@ -1,0 +1,16 @@
+diff --git a/layout/style/res/ua.css b/layout/style/res/ua.css
+index 00e45b6ddc63..343965c4cee1 100644
+--- a/layout/style/res/ua.css
++++ b/layout/style/res/ua.css
+@@ -9,6 +9,11 @@
+             them
+ */
+ 
++/* REYNARD: Hide caret since we have UIKit's own caret implementation. */
++:root {  
++  caret-color: transparent;  
++}
++
+ /* Tables */
+ 
+ *|*::-moz-table {

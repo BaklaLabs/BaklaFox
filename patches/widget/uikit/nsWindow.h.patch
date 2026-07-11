@@ -1,0 +1,82 @@
+diff --git a/widget/uikit/nsWindow.h b/widget/uikit/nsWindow.h
+index f9488e23575e..1345886ce27d 100644
+--- a/widget/uikit/nsWindow.h
++++ b/widget/uikit/nsWindow.h
+@@ -22,10 +22,12 @@ typedef struct objc_object ChildView;
+ 
+ namespace mozilla::layers {
+ class NativeLayerRootCA;
+-}
++class NativeLayerRootRemoteMacParent;
++}  // namespace mozilla::layers
+ 
+ namespace mozilla::widget {
+ class EventDispatcher;
++class PlatformCompositorWidgetDelegate;
+ class TextInputHandler;
+ }  // namespace mozilla::widget
+ 
+@@ -60,7 +62,10 @@ class nsWindow final : public nsIWidget {
+   void Move(const DesktopPoint&) override;
+   nsSizeMode SizeMode() override { return mSizeMode; }
+   void SetSizeMode(nsSizeMode aMode) override;
+-  void EnteredFullScreen(bool aFullScreen);
++  [[nodiscard]] nsresult MakeFullScreen(bool aFullScreen) override
++      MOZ_REQUIRES(mozilla::sMainThreadCapability);
++  void EnteredFullScreen(bool aFullScreen)
++      MOZ_REQUIRES(mozilla::sMainThreadCapability);
+   void Resize(const DesktopSize&, bool aRepaint) override;
+   void Resize(const DesktopRect&, bool aRepaint) override;
+   void DoResize(double aX, double aY, double aWidth, double aHeight,
+@@ -77,6 +82,7 @@ class nsWindow final : public nsIWidget {
+     // XXX: terrible
+     return 326.0f;
+   }
++  uint32_t GetMaxTouchPoints() const override;
+   double GetDefaultScaleInternal() override { return BackingScaleFactor(); }
+   int32_t RoundsWidgetCoordinatesTo() override;
+ 
+@@ -93,6 +99,9 @@ class nsWindow final : public nsIWidget {
+   void SetInputContext(const InputContext& aContext,
+                        const InputContextAction& aAction) override;
+   InputContext GetInputContext() override;
++  void NotifyWindowActivationState(bool aActive);
++  void SetCompositorWidgetDelegate(
++      mozilla::widget::CompositorWidgetDelegate* aDelegate) override;
+   TextEventDispatcherListener* GetNativeTextEventDispatcherListener() override;
+ 
+   mozilla::widget::TextInputHandler* GetTextInputHandler() const {
+@@ -109,6 +118,11 @@ class nsWindow final : public nsIWidget {
+   */
+ 
+   mozilla::layers::NativeLayerRoot* GetNativeLayerRoot() override;
++  void GetCompositorWidgetInitData(
++      mozilla::widget::CompositorWidgetInitData* aInitData) override;
++  void DestroyCompositor() override;
++  void NotifyCompositorSessionLost(
++      mozilla::layers::CompositorSession* aSession) override;
+ 
+   void HandleMainThreadCATransaction();
+ 
+@@ -147,6 +161,8 @@ class nsWindow final : public nsIWidget {
+   nsresult GetCurrentOffset(uint32_t& aOffset, uint32_t& aLength);
+   nsresult DeleteRange(int aOffset, int aLen);
+ 
++  void CloseNativeLayerRemoteParent(bool aWaitUntilClosed);
++  void DestroyNativeLayerRoot();
+   void TearDownView();
+ 
+   ChildView* mNativeView;
+@@ -158,8 +174,12 @@ class nsWindow final : public nsIWidget {
+   mozilla::widget::InputContext mInputContext;
+   RefPtr<mozilla::widget::TextInputHandler> mTextInputHandler;
+   RefPtr<mozilla::widget::IOSView> mIOSView;
++  mozilla::widget::PlatformCompositorWidgetDelegate* mCompositorWidgetDelegate =
++      nullptr;
+ 
+   RefPtr<mozilla::layers::NativeLayerRootCA> mNativeLayerRoot;
++  RefPtr<mozilla::layers::NativeLayerRootRemoteMacParent>
++      mNativeLayerRootRemoteMacParent;
+ 
+   RefPtr<mozilla::CancelableRunnable> mUnsuspendAsyncCATransactionsRunnable;
+   LayoutDeviceIntRect mBounds;

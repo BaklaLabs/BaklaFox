@@ -1,0 +1,51 @@
+diff --git a/widget/uikit/GeckoViewRuntimeSupport.h b/widget/uikit/GeckoViewRuntimeSupport.h
+new file mode 100644
+index 000000000000..7ea2b8158a89
+--- /dev/null
++++ b/widget/uikit/GeckoViewRuntimeSupport.h
+@@ -0,0 +1,44 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef mozilla_widget_GeckoViewRuntimeSupport_h
++#define mozilla_widget_GeckoViewRuntimeSupport_h
++
++#include <stdbool.h>
++#include <stdint.h>
++
++typedef struct DeviceOSVersion {
++  int32_t majorVersion;
++  int32_t minorVersion;
++  int32_t patchVersion;
++} DeviceOSVersion;
++
++typedef struct JITRuntimeInfo {
++  uint8_t hasTXMSupport;
++  DeviceOSVersion deviceOSVersion;
++} JITRuntimeInfo;
++
++typedef struct ChildJITStatus {
++  uint8_t enabled;
++  JITRuntimeInfo runtimeInfo;
++} ChildJITStatus;
++
++#ifdef __cplusplus
++namespace mozilla::widget {
++
++using ::ChildJITStatus;
++using ::DeviceOSVersion;
++using ::JITRuntimeInfo;
++
++void NotifyChildProcessStarted(int32_t aPid, const char* aProcessType);
++void ReportJITStatusForChild(int32_t aPid, bool aEnabled,
++                             JITRuntimeInfo aRuntimeInfo);
++
++}  // namespace mozilla::widget
++#endif
++
++#endif /* mozilla_widget_GeckoViewRuntimeSupport_h */
+\ No newline at end of file

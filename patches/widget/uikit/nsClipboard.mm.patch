@@ -1,0 +1,302 @@
+diff --git a/widget/uikit/nsClipboard.mm b/widget/uikit/nsClipboard.mm
+new file mode 100644
+index 000000000000..dbbd7971780e
+--- /dev/null
++++ b/widget/uikit/nsClipboard.mm
+@@ -0,0 +1,296 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#import <UIKit/UIKit.h>
++
++#include "nsClipboard.h"
++
++#include "nsCOMPtr.h"
++#include "nsComponentManagerUtils.h"
++#include "nsISupportsPrimitives.h"
++#include "nsPrimitiveHelpers.h"
++
++using namespace mozilla;
++
++namespace {
++
++static NSString* const kUIKitClipboardPlainTextType = @"public.utf8-plain-text";
++static NSString* const kUIKitClipboardTextType = @"public.text";
++static NSString* const kUIKitClipboardHTMLType = @"public.html";
++
++static void AssignNSStringTo(nsAString& aDestination, NSString* aSource) {
++  if (!aSource) {
++    aDestination.Truncate();
++    return;
++  }
++
++  const NSUInteger length = [aSource length];
++  aDestination.SetLength(length);
++  if (!length) {
++    return;
++  }
++
++  [aSource getCharacters:reinterpret_cast<unichar*>(aDestination.BeginWriting())
++                   range:NSMakeRange(0, length)];
++}
++
++static NSString* ToNSString(const nsAString& aSource) {
++  return [NSString stringWithCharacters:reinterpret_cast<const unichar*>(
++                                            aSource.BeginReading())
++                                 length:aSource.Length()];
++}
++
++static NSString* WrapHtmlForSystemPasteboard(NSString* aString) {
++  return [NSString stringWithFormat:@"<html>"
++                                     "<head>"
++                                     "<meta http-equiv=\"content-type\" "
++                                     "content=\"text/html; charset=utf-8\">"
++                                     "</head>"
++                                     "<body>"
++                                     "%@"
++                                     "</body>"
++                                     "</html>",
++                                    aString];
++}
++
++static NSString* StringFromPasteboardValue(id aValue) {
++  if (!aValue) {
++    return nil;
++  }
++  if ([aValue isKindOfClass:[NSString class]]) {
++    return static_cast<NSString*>(aValue);
++  }
++  if ([aValue isKindOfClass:[NSData class]]) {
++    NSData* data = static_cast<NSData*>(aValue);
++    NSString* string =
++        [[[NSString alloc] initWithData:data
++                               encoding:NSUTF8StringEncoding] autorelease];
++    if (!string) {
++      string =
++          [[[NSString alloc] initWithData:data
++                                 encoding:NSUnicodeStringEncoding] autorelease];
++    }
++    return string;
++  }
++  return nil;
++}
++
++static NSString* GetStringValue(UIPasteboard* aPasteboard, NSString* aType) {
++  return StringFromPasteboardValue([aPasteboard valueForPasteboardType:aType]);
++}
++
++static nsresult ExtractTransferableStrings(nsITransferable* aTransferable,
++                                           nsString& aText, nsString& aHTML) {
++  nsTArray<nsCString> flavors;
++  nsresult rv = aTransferable->FlavorsTransferableCanExport(flavors);
++  if (NS_FAILED(rv)) {
++    return rv;
++  }
++
++  for (const auto& flavor : flavors) {
++    if (!flavor.EqualsLiteral(kTextMime) && !flavor.EqualsLiteral(kHTMLMime)) {
++      continue;
++    }
++
++    nsCOMPtr<nsISupports> data;
++    rv = aTransferable->GetTransferData(flavor.get(), getter_AddRefs(data));
++    if (NS_FAILED(rv)) {
++      continue;
++    }
++
++    nsCOMPtr<nsISupportsString> supportsString = do_QueryInterface(data);
++    if (!supportsString) {
++      continue;
++    }
++
++    if (flavor.EqualsLiteral(kTextMime)) {
++      supportsString->GetData(aText);
++    } else {
++      supportsString->GetData(aHTML);
++    }
++  }
++
++  return NS_OK;
++}
++
++static mozilla::Result<nsCOMPtr<nsISupports>, nsresult> PrimitiveFromNSString(
++    const nsACString& aFlavor, NSString* aString) {
++  if (!aString || ![aString length]) {
++    return nsCOMPtr<nsISupports>{};
++  }
++
++  nsAutoString value;
++  AssignNSStringTo(value, aString);
++  value.StripChar(char16_t(0));
++  if (value.IsEmpty()) {
++    return nsCOMPtr<nsISupports>{};
++  }
++
++  nsCOMPtr<nsISupports> wrapper;
++  nsPrimitiveHelpers::CreatePrimitiveForData(aFlavor, value.get(),
++                                             value.Length() * sizeof(char16_t),
++                                             getter_AddRefs(wrapper));
++  return std::move(wrapper);
++}
++
++static UIPasteboard* GetPasteboard(
++    nsIClipboard::ClipboardType aWhichClipboard) {
++  if (aWhichClipboard != nsIClipboard::kGlobalClipboard) {
++    return nil;
++  }
++  return [UIPasteboard generalPasteboard];
++}
++
++}  // namespace
++
++NS_IMPL_ISUPPORTS_INHERITED0(nsClipboard, nsBaseClipboard)
++
++nsClipboard::nsClipboard()
++    : nsBaseClipboard(mozilla::dom::ClipboardCapabilities(
++          false /* supportsSelectionClipboard */,
++          false /* supportsFindClipboard */,
++          false /* supportsSelectionCache */)) {}
++
++nsClipboard::~nsClipboard() = default;
++
++NS_IMETHODIMP
++nsClipboard::SetNativeClipboardData(nsITransferable* aTransferable,
++                                    ClipboardType aWhichClipboard) {
++  MOZ_DIAGNOSTIC_ASSERT(aTransferable);
++  MOZ_DIAGNOSTIC_ASSERT(
++      nsIClipboard::IsClipboardTypeSupported(aWhichClipboard));
++
++  UIPasteboard* pasteboard = GetPasteboard(aWhichClipboard);
++  if (!pasteboard) {
++    return NS_ERROR_FAILURE;
++  }
++
++  nsString text;
++  nsString html;
++  nsresult rv = ExtractTransferableStrings(aTransferable, text, html);
++  if (NS_FAILED(rv)) {
++    return rv;
++  }
++
++  NSMutableDictionary* item = [NSMutableDictionary dictionary];
++  if (!text.IsEmpty()) {
++    NSString* textValue = ToNSString(text);
++    item[kUIKitClipboardPlainTextType] = textValue;
++    item[kUIKitClipboardTextType] = textValue;
++  }
++  if (!html.IsEmpty()) {
++    NSData* htmlData = [WrapHtmlForSystemPasteboard(ToNSString(html))
++        dataUsingEncoding:NSUTF8StringEncoding];
++    if (htmlData) {
++      item[kUIKitClipboardHTMLType] = htmlData;
++    }
++  }
++  if (![item count]) {
++    return NS_OK;
++  }
++
++  NSDictionary* options = nil;
++  if (aTransferable->GetIsPrivateData()) {
++    options = [NSDictionary dictionaryWithObject:@YES
++                                          forKey:UIPasteboardOptionLocalOnly];
++  }
++
++  NSArray* items = [NSArray arrayWithObject:item];
++  if (options) {
++    [pasteboard setItems:items options:options];
++  } else {
++    [pasteboard setItems:items];
++  }
++
++  return NS_OK;
++}
++
++mozilla::Result<nsCOMPtr<nsISupports>, nsresult>
++nsClipboard::GetNativeClipboardData(const nsACString& aFlavor,
++                                    ClipboardType aWhichClipboard) {
++  MOZ_DIAGNOSTIC_ASSERT(
++      nsIClipboard::IsClipboardTypeSupported(aWhichClipboard));
++
++  UIPasteboard* pasteboard = GetPasteboard(aWhichClipboard);
++  if (!pasteboard) {
++    return Err(NS_ERROR_FAILURE);
++  }
++
++  if (aFlavor.EqualsLiteral(kTextMime)) {
++    NSString* text = [pasteboard string];
++    if (!text) {
++      text = GetStringValue(pasteboard, kUIKitClipboardPlainTextType);
++    }
++    if (!text) {
++      text = GetStringValue(pasteboard, kUIKitClipboardTextType);
++    }
++    return PrimitiveFromNSString(aFlavor, text);
++  }
++
++  if (aFlavor.EqualsLiteral(kHTMLMime)) {
++    return PrimitiveFromNSString(
++        aFlavor, GetStringValue(pasteboard, kUIKitClipboardHTMLType));
++  }
++
++  return nsCOMPtr<nsISupports>{};
++}
++
++nsresult nsClipboard::EmptyNativeClipboardData(ClipboardType aWhichClipboard) {
++  MOZ_DIAGNOSTIC_ASSERT(
++      nsIClipboard::IsClipboardTypeSupported(aWhichClipboard));
++
++  UIPasteboard* pasteboard = GetPasteboard(aWhichClipboard);
++  if (!pasteboard) {
++    return NS_ERROR_FAILURE;
++  }
++
++  [pasteboard setItems:[NSArray array]];
++  return NS_OK;
++}
++
++mozilla::Result<int32_t, nsresult>
++nsClipboard::GetNativeClipboardSequenceNumber(ClipboardType aWhichClipboard) {
++  MOZ_DIAGNOSTIC_ASSERT(
++      nsIClipboard::IsClipboardTypeSupported(aWhichClipboard));
++
++  UIPasteboard* pasteboard = GetPasteboard(aWhichClipboard);
++  if (!pasteboard) {
++    return Err(NS_ERROR_FAILURE);
++  }
++
++  return static_cast<int32_t>(pasteboard.changeCount);
++}
++
++mozilla::Result<bool, nsresult>
++nsClipboard::HasNativeClipboardDataMatchingFlavors(
++    const nsTArray<nsCString>& aFlavorList, ClipboardType aWhichClipboard) {
++  MOZ_DIAGNOSTIC_ASSERT(
++      nsIClipboard::IsClipboardTypeSupported(aWhichClipboard));
++
++  UIPasteboard* pasteboard = GetPasteboard(aWhichClipboard);
++  if (!pasteboard) {
++    return Err(NS_ERROR_FAILURE);
++  }
++
++  for (const auto& flavor : aFlavorList) {
++    if (flavor.EqualsLiteral(kTextMime)) {
++      if (pasteboard.hasStrings ||
++          GetStringValue(pasteboard, kUIKitClipboardPlainTextType) ||
++          GetStringValue(pasteboard, kUIKitClipboardTextType)) {
++        return true;
++      }
++      continue;
++    }
++
++    if (flavor.EqualsLiteral(kHTMLMime) &&
++        GetStringValue(pasteboard, kUIKitClipboardHTMLType)) {
++      return true;
++    }
++  }
++
++  return false;
++}

@@ -1,0 +1,51 @@
+diff --git a/widget/uikit/TextInputHandler.h b/widget/uikit/TextInputHandler.h
+index 5073da48f88c..1a41d7d7bb67 100644
+--- a/widget/uikit/TextInputHandler.h
++++ b/widget/uikit/TextInputHandler.h
+@@ -7,6 +7,7 @@
+ 
+ #import <UIKit/UITextInput.h>
+ 
++#include "mozilla/Maybe.h"
+ #include "mozilla/EventForwards.h"
+ #include "mozilla/TextEventDispatcherListener.h"
+ #include "mozilla/widget/IMEData.h"
+@@ -39,6 +40,20 @@ class TextInputHandler final : public TextEventDispatcherListener {
+   // UIKeyInput delegation
+   bool InsertText(NSString* aText);
+   bool HandleCommand(Command aCommand);
++  bool MarkedRange(NSRange& aRange);
++  bool SetMarkedText(NSString* aText, const NSRange& aSelectedRange);
++  bool UnmarkText();
++
++  bool SelectedRange(NSRange& aRange);
++  bool SetSelectedRange(const NSRange& aRange);
++  bool TextLength(uint32_t& aLength);
++  bool TextInRange(const NSRange& aRange, nsString& aText);
++  bool ReplaceRange(const NSRange& aRange, NSString* aText);
++  bool TextRectForRange(const NSRange& aRange, LayoutDeviceIntRect& aRect);
++  bool CaretRectForOffset(uint32_t aOffset, LayoutDeviceIntRect& aRect);
++  bool EditorRect(LayoutDeviceIntRect& aRect);
++  bool RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
++                  bool* aIsEnabled = nullptr);
+ 
+   void OnDestroyed();
+ 
+@@ -54,11 +69,17 @@ class TextInputHandler final : public TextEventDispatcherListener {
+ 
+   bool EmulateKeyboardEvent(uint32_t aKeyCode, KeyNameIndex aKeyNameIndex,
+                             char16_t charCode);
++  bool CancelMarkedText();
++  void ClearCompositionState();
++  bool HasMarkedText() const;
+ 
+   bool Destroyed() { return !mWidget; }
+ 
+   nsWindow* mWidget;  // weak ref
+   RefPtr<TextEventDispatcher> mDispatcher;
++  NSRange mMarkedRange;
++  Maybe<NSRange> mSelectedRangeOverride;
++  nsString mMarkedText;
+ };
+ 
+ }  // namespace mozilla::widget

@@ -1,0 +1,14 @@
+diff --git a/netwerk/system/ios/nsNetworkLinkServiceIOS.mm b/netwerk/system/ios/nsNetworkLinkServiceIOS.mm
+deleted file mode 100644
+index cf9881652efe..000000000000
+--- a/netwerk/system/ios/nsNetworkLinkServiceIOS.mm
++++ /dev/null
+@@ -1,8 +0,0 @@
+-/* This Source Code Form is subject to the terms of the Mozilla Public
+- * License, v. 2.0. If a copy of the MPL was not distributed with this
+- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
+-#include "nsINetworkLinkService.h"
+-
+-// static
+-bool nsINetworkLinkService::HasNonLocalIPv6Address() { return false; }

@@ -1,0 +1,29 @@
+diff --git a/toolkit/xre/IOSBootstrap.h b/toolkit/xre/IOSBootstrap.h
+index 2fffb86bd6d7..14bb03224129 100644
+--- a/toolkit/xre/IOSBootstrap.h
++++ b/toolkit/xre/IOSBootstrap.h
+@@ -9,11 +9,14 @@
+  * built independently because it is used for Swift bridging too. */
+ #ifdef MOZILLA_CLIENT
+ #  include <mozilla/Types.h>
++#  include "mozilla/widget/GeckoViewRuntimeSupport.h"
+ #else
+ #  define MOZ_EXPORT
+ #  define MOZ_BEGIN_EXTERN_C
+ #  define MOZ_END_EXTERN_C
++#  include <GeckoView/GeckoViewRuntimeSupport.h>
+ #endif
++#include <stdbool.h>
+ #include <xpc/xpc.h>
+ 
+ @protocol SwiftGeckoViewRuntime;
+@@ -28,6 +31,9 @@ MOZ_EXPORT void ChildProcessInit(xpc_connection_t aXpcConnection,
+                                  id<GeckoProcessExtension> aProcess,
+                                  id<SwiftGeckoViewRuntime> aRuntime);
+ 
++MOZ_EXPORT void ReportJITStatusForChild(int32_t aPid, bool aEnabled,
++                                        JITRuntimeInfo aRuntimeInfo);
++
+ MOZ_END_EXTERN_C
+ 
+ #endif /* IOSBootstrap_h */

@@ -1,0 +1,41 @@
+diff --git a/js/src/jit/arm64/Assembler-arm64.h b/js/src/jit/arm64/Assembler-arm64.h
+index e8ef2354a79e..0a206cef0e77 100644
+--- a/js/src/jit/arm64/Assembler-arm64.h
++++ b/js/src/jit/arm64/Assembler-arm64.h
+@@ -6,8 +6,8 @@
+ #define A64_ASSEMBLER_A64_H_
+ 
+ #include "jit/arm64/vixl/Assembler-vixl.h"
+-
+ #include "jit/CompactBuffer.h"
++#include "jit/ProcessExecutableMemory.h"
+ #include "jit/shared/Disassembler-shared.h"
+ #include "wasm/WasmTypeDecls.h"
+ 
+@@ -509,10 +509,14 @@ class Assembler : public vixl::Assembler {
+     size_t targetOffset = label.target().offset();
+ 
+     if (mode == CodeLabel::MoveImmediate) {
+-      Instruction* inst = (Instruction*)(rawCode + patchAtOffset);
+-      Assembler::UpdateLoad64Value(inst, (uint64_t)(rawCode + targetOffset));
++      Instruction* writableInst = WritableJitAllocationFromExecutable(
++          reinterpret_cast<Instruction*>(rawCode + patchAtOffset),
++          sizeof(uint32_t) * 4);
++      Assembler::UpdateLoad64Value(writableInst,
++                                   (uint64_t)(rawCode + targetOffset));
+     } else {
+-      *reinterpret_cast<const void**>(rawCode + patchAtOffset) =
++      *WritableJitAllocationFromExecutable(
++          reinterpret_cast<const void**>(rawCode + patchAtOffset)) =
+           rawCode + targetOffset;
+     }
+   }
+@@ -574,7 +578,7 @@ class Assembler : public vixl::Assembler {
+ 
+   static void PatchWrite_Imm32(CodeLocationLabel label, Imm32 imm) {
+     // Raw is going to be the return address.
+-    uint32_t* raw = (uint32_t*)label.raw();
++    uint32_t* raw = WritableJitAllocationFromExecutable((uint32_t*)label.raw());
+     // Overwrite the 4 bytes before the return address, which will end up being
+     // the call instruction.
+     *(raw - 1) = imm.value;

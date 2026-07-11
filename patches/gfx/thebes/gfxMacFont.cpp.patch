@@ -1,0 +1,46 @@
+diff --git a/gfx/thebes/gfxMacFont.cpp b/gfx/thebes/gfxMacFont.cpp
+index 005688e3db92..674480ee7ac3 100644
+--- a/gfx/thebes/gfxMacFont.cpp
++++ b/gfx/thebes/gfxMacFont.cpp
+@@ -26,6 +26,14 @@
+ using namespace mozilla;
+ using namespace mozilla::gfx;
+ 
++// REYNARD: Pull the preserved CoreText descriptor from the unscaled font so
++// metrics and glyph measurement can recreate the original Apple system font.
++static CTFontDescriptorRef GetUnscaledFontDescriptor(const gfxMacFont* aFont) {
++  auto* unscaledFont =
++      static_cast<UnscaledFontMac*>(aFont->GetUnscaledFont().get());
++  return unscaledFont ? unscaledFont->GetFontDescriptorRef() : nullptr;
++}
++
+ template <class T>
+ struct TagEquals {
+   bool Equals(const T& aIter, uint32_t aTag) const {
+@@ -444,8 +452,10 @@ int32_t gfxMacFont::GetGlyphWidth(uint16_t aGID) {
+   if (!mCTFont) {
+     bool isInstalledFont =
+         !mFontEntry->IsUserFont() || mFontEntry->IsLocalUserFont();
++    // REYNARD: Use the preserved font descriptor
++    CTFontDescriptorRef fontDesc = GetUnscaledFontDescriptor(this);
+     mCTFont = CreateCTFontFromCGFontWithVariations(mCGFont, mAdjustedSize,
+-                                                   isInstalledFont);
++                                                   isInstalledFont, fontDesc);
+     if (!mCTFont) {  // shouldn't happen, but let's be safe
+       NS_WARNING("failed to create CTFontRef to measure glyph width");
+       return 0;
+@@ -501,8 +511,12 @@ bool gfxMacFont::GetGlyphBounds(uint16_t aGID, gfxRect* aBounds, bool aTight) {
+ // for sfnts, including ALL downloadable fonts, we prefer to use
+ // InitMetricsFromSfntTables and avoid platform APIs.
+ void gfxMacFont::InitMetricsFromPlatform() {
+-  AutoCFTypeRef<CTFontRef> ctFont(
+-      ::CTFontCreateWithGraphicsFont(mCGFont, mAdjustedSize, nullptr, nullptr));
++  bool isInstalledFont =
++      !mFontEntry->IsUserFont() || mFontEntry->IsLocalUserFont();
++  // REYNARD: Use the preserved font descriptor
++  CTFontDescriptorRef fontDesc = GetUnscaledFontDescriptor(this);
++  AutoCFTypeRef<CTFontRef> ctFont(CreateCTFontFromCGFontWithVariations(
++      mCGFont, mAdjustedSize, isInstalledFont, fontDesc));
+   if (!ctFont) {
+     return;
+   }

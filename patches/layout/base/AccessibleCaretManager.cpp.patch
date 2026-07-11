@@ -1,0 +1,56 @@
+diff --git a/layout/base/AccessibleCaretManager.cpp b/layout/base/AccessibleCaretManager.cpp
+index ccfe08f6e950..c7edd3ddfe0d 100644
+--- a/layout/base/AccessibleCaretManager.cpp
++++ b/layout/base/AccessibleCaretManager.cpp
+@@ -245,6 +245,9 @@ void AccessibleCaretManager::UpdateCaretsForCursorMode(
+     const UpdateCaretsHintSet& aHints) {
+   AC_LOG("%s, selection: %p", __FUNCTION__, GetSelection());
+ 
++  mCarets.GetFirst()->SetVisuallyHiddenForNativeSelection(false);
++  mCarets.GetSecond()->SetVisuallyHiddenForNativeSelection(false);
++
+   int32_t offset = 0;
+   nsIFrame* frame = nullptr;
+   if (!IsCaretDisplayableInCursorMode(&frame, &offset)) {
+@@ -252,6 +255,8 @@ void AccessibleCaretManager::UpdateCaretsForCursorMode(
+     return;
+   }
+ 
++  mCarets.GetFirst()->SetVisuallyHiddenForNativeSelection(true);
++
+   PositionChangedResult result = mCarets.GetFirst()->SetPosition(frame, offset);
+ 
+   switch (result) {
+@@ -333,6 +338,14 @@ void AccessibleCaretManager::UpdateCaretsForSelectionMode(
+     return;
+   }
+ 
++  const bool hideForNativeSelection =
++      GetEditingHostForFrame(startFrameAndOffset.mFrame) ||
++      GetEditingHostForFrame(endFrameAndOffset.mFrame);
++  mCarets.GetFirst()->SetVisuallyHiddenForNativeSelection(
++      hideForNativeSelection);
++  mCarets.GetSecond()->SetVisuallyHiddenForNativeSelection(
++      hideForNativeSelection);
++
+   auto updateSingleCaret = [aHints](AccessibleCaret* aCaret, nsIFrame* aFrame,
+                                     int32_t aOffset) -> PositionChangedResult {
+     PositionChangedResult result = aCaret->SetPosition(aFrame, aOffset);
+@@ -396,15 +409,8 @@ void AccessibleCaretManager::UpdateCaretsForSelectionMode(
+   }
+ 
+   if (!aHints.contains(UpdateCaretsHint::RespectOldAppearance)) {
+-    // Only check for tilt carets when the caller doesn't ask us to preserve
+-    // old appearance. Otherwise we might override the appearance set by the
+-    // caller.
+-    if (StaticPrefs::layout_accessiblecaret_always_tilt()) {
+-      UpdateCaretsForAlwaysTilt(startFrameAndOffset.mFrame,
+-                                endFrameAndOffset.mFrame);
+-    } else {
+-      UpdateCaretsForOverlappingTilt();
+-    }
++    UpdateCaretsForAlwaysTilt(startFrameAndOffset.mFrame,
++                              endFrameAndOffset.mFrame);
+   }
+ 
+   if (!aHints.contains(UpdateCaretsHint::DispatchNoEvent) && !mActiveCaret) {

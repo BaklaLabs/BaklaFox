@@ -1,0 +1,33 @@
+diff --git a/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs
+index 3e93dbca031b..7b66908af41d 100644
+--- a/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs
++++ b/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs
+@@ -215,6 +215,28 @@ export const GeckoViewStorageController = {
+         );
+         break;
+       }
++      case "GeckoView:RemovePermission": {
++        const principal = lazy.E10SUtils.deserializePrincipal(aData.principal);
++        let key = aData.perm;
++        if (key == "storage-access") {
++          key = "3rdPartyFrameStorage^" + aData.thirdPartyOrigin;
++        }
++        Services.perms.removeFromPrincipal(principal, key);
++        break;
++      }
++
++      case "GeckoView:RemovePermissionByURI": {
++        const uri = Services.io.newURI(aData.uri);
++        const principal = Services.scriptSecurityManager.createContentPrincipal(
++          uri,
++          {
++            geckoViewSessionContextId: aData.contextId ?? undefined,
++            privateBrowsingId: aData.privateId,
++          }
++        );
++        Services.perms.removeFromPrincipal(principal, aData.perm);
++        break;
++      }
+ 
+       case "GeckoView:SetCookieBannerModeForDomain": {
+         let exceptionLabel = "SetCookieBannerModeForDomain";

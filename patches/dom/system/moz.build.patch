@@ -1,0 +1,20 @@
+diff --git a/dom/system/moz.build b/dom/system/moz.build
+index d3c9bd6b76a3..fa1b3440a7c4 100644
+--- a/dom/system/moz.build
++++ b/dom/system/moz.build
+@@ -37,12 +37,14 @@ if toolkit == "windows":
+     DIRS += ["windows"]
+ elif toolkit == "cocoa":
+     DIRS += ["mac"]
++elif toolkit == "uikit":
++    DIRS += ["uikit"]
+ elif toolkit == "android":
+     DIRS += ["android"]
+ elif toolkit == "gtk":
+     DIRS += ["linux"]
+ 
+-if toolkit != "cocoa":
++if toolkit not in ("cocoa", "uikit"):
+     EXPORTS += [
+         "nsOSPermissionRequest.h",
+     ]

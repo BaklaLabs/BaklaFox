@@ -1,0 +1,39 @@
+diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+index a3b580d6bd6c..396f311ce7e6 100644
+--- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
++++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+@@ -1645,6 +1645,19 @@ var XPIStates = {
+           startupScanScopes |= AddonManager.SCOPE_PROFILE;
+         }
+       }
++
++      const currentProfileLocation = XPIStates.getLocation(KEY_APP_PROFILE);
++      const previousProfilePath = oldState[KEY_APP_PROFILE]?.path;
++      if (
++        currentProfileLocation?.path &&
++        previousProfilePath &&
++        currentProfileLocation.path !== previousProfilePath
++      ) {
++        logger.warn(
++          `Force scan SCOPE_PROFILE location (app-profile path changed from ${previousProfilePath} to ${currentProfileLocation.path})`
++        );
++        startupScanScopes |= AddonManager.SCOPE_PROFILE;
++      }
+     }
+ 
+     for (let loc of XPIStates.locations()) {
+@@ -1713,9 +1726,13 @@ var XPIStates = {
+         } else {
+           let addonChanged = false;
+           if (entry instanceof Ci.nsIFile) {
++            const currentRootURI = getURIForResourceInFile(entry, "").spec;
+             addonChanged =
+-              xpiState.getModTime(entry) || entry.path != xpiState.path;
++              xpiState.getModTime(entry) ||
++              entry.path != xpiState.path ||
++              currentRootURI != xpiState.rootURI;
+             xpiState.file = entry.clone();
++            xpiState.rootURI = currentRootURI;
+           } else {
+             addonChanged =
+               buildIdChanged ||

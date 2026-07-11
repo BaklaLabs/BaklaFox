@@ -1,0 +1,26 @@
+diff --git a/dom/geolocation/moz.build b/dom/geolocation/moz.build
+index 63dddd4de9e2..df3cf42fbdaf 100644
+--- a/dom/geolocation/moz.build
++++ b/dom/geolocation/moz.build
+@@ -43,6 +43,10 @@ if (
+     UNIFIED_SOURCES += [
+         "GeolocationSystemWin.cpp",
+     ]
++elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "uikit":
++    UNIFIED_SOURCES += [
++        "GeolocationSystemUIKit.mm",
++    ]
+ elif CONFIG["OS_TARGET"] == "Darwin" and CONFIG["MOZ_BUILD_APP"] == "browser":
+     UNIFIED_SOURCES += [
+         "GeolocationSystemMac.mm",
+@@ -77,6 +81,10 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
+     LOCAL_INCLUDES += [
+         "/dom/system/mac",
+     ]
++elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "uikit":
++    LOCAL_INCLUDES += [
++        "/dom/system/mac",
++    ]
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+     LOCAL_INCLUDES += [
+         "/dom/system/windows/location",

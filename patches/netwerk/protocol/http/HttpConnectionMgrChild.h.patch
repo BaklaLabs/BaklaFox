@@ -1,0 +1,15 @@
+diff --git a/netwerk/protocol/http/HttpConnectionMgrChild.h b/netwerk/protocol/http/HttpConnectionMgrChild.h
+index 8a4060b17f9e..3c6ae4eda51c 100644
+--- a/netwerk/protocol/http/HttpConnectionMgrChild.h
++++ b/netwerk/protocol/http/HttpConnectionMgrChild.h
+@@ -33,6 +33,10 @@ class HttpConnectionMgrChild final : public PHttpConnectionMgrChild {
+       PHttpTransactionChild* aTrans, const ClassOfService& aClassOfService);
+   mozilla::ipc::IPCResult RecvCancelTransaction(PHttpTransactionChild* aTrans,
+                                                 const nsresult& aReason);
++  mozilla::ipc::IPCResult RecvStoreServerCertHashes(
++      const HttpConnectionInfoCloneArgs& aConnInfo, const bool& aNoSpdy,
++      const bool& aNoHttp3,
++      nsTArray<mozilla::ipc::WebTransportHash>&& aServerCertHashes);
+   mozilla::ipc::IPCResult RecvSpeculativeConnect(
+       const HttpConnectionInfoCloneArgs& aConnInfo,
+       Maybe<SpeculativeConnectionOverriderArgs> aOverriderArgs, uint32_t aCaps,

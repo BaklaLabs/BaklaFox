@@ -1,0 +1,28 @@
+diff --git a/toolkit/mozapps/extensions/internal/AddonSettings.sys.mjs b/toolkit/mozapps/extensions/internal/AddonSettings.sys.mjs
+index 09bb0adc9717..ddb88717efc9 100644
+--- a/toolkit/mozapps/extensions/internal/AddonSettings.sys.mjs
++++ b/toolkit/mozapps/extensions/internal/AddonSettings.sys.mjs
+@@ -68,17 +68,12 @@ XPCOMUtils.defineLazyPreferenceGetter(
+     !AppConstants.MOZ_APP_VERSION_DISPLAY.endsWith("esr")
+ );
+ 
+-// Whether or not we're running in GeckoView embedded in an Android app
+-if (Cu.isInAutomation) {
+-  XPCOMUtils.defineLazyPreferenceGetter(
+-    AddonSettings,
+-    "IS_EMBEDDED",
+-    PREF_IS_EMBEDDED,
+-    false
+-  );
+-} else {
+-  makeConstant("IS_EMBEDDED", AppConstants.platform === "android");
+-}
++XPCOMUtils.defineLazyPreferenceGetter(
++  AddonSettings,
++  "IS_EMBEDDED",
++  PREF_IS_EMBEDDED,
++  AppConstants.platform === "android"
++);
+ 
+ /**
+  * AddonSettings.EXPERIMENTS_ENABLED

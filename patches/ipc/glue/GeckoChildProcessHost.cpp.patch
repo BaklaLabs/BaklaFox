@@ -1,0 +1,346 @@
+diff --git a/ipc/glue/GeckoChildProcessHost.cpp b/ipc/glue/GeckoChildProcessHost.cpp
+index 8bfc08afb169..785a90cc36a8 100644
+--- a/ipc/glue/GeckoChildProcessHost.cpp
++++ b/ipc/glue/GeckoChildProcessHost.cpp
+@@ -32,6 +32,13 @@
+ #include "prenv.h"
+ #include "prerror.h"
+ 
++#ifdef XP_IOS
++#  include <unistd.h>
++#  include <stdio.h>
++#  include <unordered_map>
++#  include "mozilla/widget/GeckoViewRuntimeSupport.h"
++#endif
++
+ #if defined(MOZ_SANDBOX)
+ #  include "mozilla/SandboxSettings.h"
+ #  include "nsAppDirectoryServiceDefs.h"
+@@ -98,6 +105,8 @@
+ #include "nscore.h"  // for NS_FREE_PERMANENT_DATA
+ #include "nsIThread.h"
+ 
++#include <atomic>
++
+ using mozilla::MonitorAutoLock;
+ using mozilla::Preferences;
+ using mozilla::StaticMutexAutoLock;
+@@ -127,13 +136,54 @@ extern char** environ;
+ namespace mozilla {
+ namespace ipc {
+ 
++#ifdef XP_IOS
++// REYNARD: Track one bootstrap signal pipe per child pid so the Swift host can
++// report whether the iOS JIT attach workflow actually succeeded before the
++// child enables SpiderMonkey JIT execution.
++static StaticMutex sChildJITPipeMutex;
++static std::unordered_map<int32_t, UniqueFileHandle> sChildJITPipeWriters;
++
++}  // namespace ipc
++
++namespace widget {
++
++void ReportJITStatusForChild(int32_t aPid, bool aEnabled,
++                             JITRuntimeInfo aRuntimeInfo) {
++  UniqueFileHandle writePipe;
++
++  {
++    StaticMutexAutoLock lock(ipc::sChildJITPipeMutex);
++    auto it = ipc::sChildJITPipeWriters.find(aPid);
++    if (it == ipc::sChildJITPipeWriters.end()) {
++      return;
++    }
++    writePipe = std::move(it->second);
++    ipc::sChildJITPipeWriters.erase(it);
++  }
++
++  if (!writePipe) {
++    return;
++  }
++
++  const ChildJITStatus status = {
++      uint8_t(aEnabled ? 1 : 0),
++      aRuntimeInfo,
++  };
++  write(writePipe.get(), &status, sizeof(status));
++}
++
++}  // namespace widget
++
++namespace ipc {
++#endif
++
+ struct LaunchResults {
+   base::ProcessHandle mHandle = 0;
+ #ifdef XP_MACOSX
+   task_t mChildTask = MACH_PORT_NULL;
+ #endif
+ #ifdef XP_IOS
+-  Maybe<ExtensionKitProcess> mExtensionKitProcess;
++  Maybe<NSExtensionProcess> mNSExtensionProcess;
+   DarwinObjectPtr<xpc_connection_t> mXPCConnection;
+   UniqueBEProcessCapabilityGrant mForegroundCapabilityGrant;
+ #endif
+@@ -354,6 +404,7 @@ class IosProcessLauncher : public PosixProcessLauncher {
+   virtual RefPtr<ProcessLaunchPromise> DoLaunch() override;
+ 
+   DarwinObjectPtr<xpc_object_t> mBootstrapMessage;
++  UniqueFileHandle mJITReadySignalWriteFd;
+ };
+ typedef IosProcessLauncher ProcessLauncher;
+ #  else
+@@ -434,8 +485,8 @@ GeckoChildProcessHost::~GeckoChildProcessHost() {
+     if (mForegroundCapabilityGrant) {
+       mForegroundCapabilityGrant.reset();
+     }
+-    if (mExtensionKitProcess) {
+-      mExtensionKitProcess->Invalidate();
++    if (mNSExtensionProcess) {
++      mNSExtensionProcess->Invalidate();
+     }
+     if (mXPCConnection) {
+       xpc_connection_cancel(mXPCConnection.get());
+@@ -787,7 +838,7 @@ bool GeckoChildProcessHost::AsyncLaunch(
+                     this->mChildTask = aResults.mChildTask;
+ #endif
+ #ifdef XP_IOS
+-                    this->mExtensionKitProcess = aResults.mExtensionKitProcess;
++                    this->mNSExtensionProcess = aResults.mNSExtensionProcess;
+                     this->mXPCConnection = aResults.mXPCConnection;
+                     this->mForegroundCapabilityGrant =
+                         std::move(aResults.mForegroundCapabilityGrant);
+@@ -935,6 +986,7 @@ bool GeckoChildProcessHost::InitializeChannel(
+ 
+ void GeckoChildProcessHost::SetAlreadyDead() {
+   mozilla::AutoWriteLock handleLock(mHandleLock);
++
+   if (mChildProcessHandle &&
+       mChildProcessHandle != base::kInvalidProcessHandle) {
+     base::CloseProcessHandle(mChildProcessHandle);
+@@ -943,6 +995,30 @@ void GeckoChildProcessHost::SetAlreadyDead() {
+   mChildProcessHandle = 0;
+ }
+ 
++#if defined(XP_IOS)
++void GeckoChildProcessHost::ForceInvalidateForTermination() {
++  mozilla::AutoWriteLock handleLock(mHandleLock);
++
++  if (mForegroundCapabilityGrant) {
++    mForegroundCapabilityGrant.reset();
++  }
++  if (mNSExtensionProcess) {
++    mNSExtensionProcess->Invalidate();
++    mNSExtensionProcess.reset();
++  }
++  if (mXPCConnection) {
++    xpc_connection_cancel(mXPCConnection.get());
++    mXPCConnection = nullptr;
++  }
++
++  if (mChildProcessHandle &&
++      mChildProcessHandle != base::kInvalidProcessHandle) {
++    base::CloseProcessHandle(mChildProcessHandle);
++    mChildProcessHandle = 0;
++  }
++}
++#endif
++
+ void BaseProcessLauncher::GetChildLogName(const char* origLogName,
+                                           nsACString& buffer) {
+ #ifdef XP_WIN
+@@ -1391,20 +1467,26 @@ Result<Ok, LaunchError> IosProcessLauncher::DoSetup() {
+ }
+ 
+ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+-  ExtensionKitProcess::Kind kind = ExtensionKitProcess::Kind::WebContent;
+-  if (mProcessType == GeckoProcessType_GPU) {
+-    kind = ExtensionKitProcess::Kind::Rendering;
+-  } else if (mProcessType == GeckoProcessType_Socket) {
+-    kind = ExtensionKitProcess::Kind::Networking;
+-  }
+-
++  // REYNARD: Use the iOS extension-backed process launcher path and bootstrap
++  // child processes over libxpc.
+   DarwinObjectPtr<xpc_object_t> bootstrapMessage =
+-      AdoptDarwinObject(xpc_dictionary_create_empty());
++      AdoptDarwinObject(xpc_dictionary_create(nullptr, nullptr, 0));
+   xpc_dictionary_set_string(bootstrapMessage.get(), "message-name",
+                             "bootstrap");
+ 
++  // REYNARD: Pass a dedicated readiness pipe to each child so it can block
++  // JIT startup until the host-side attach flow reports success or failure.
++  int jitReadyPipe[2] = {-1, -1};
++  if (pipe(jitReadyPipe) != 0) {
++    return ProcessLaunchPromise::CreateAndReject(LaunchError("pipe"), __func__);
++  }
++  UniqueFileHandle jitReadyReadFd(jitReadyPipe[0]);
++  mJITReadySignalWriteFd = UniqueFileHandle(jitReadyPipe[1]);
++  xpc_dictionary_set_fd(bootstrapMessage.get(), "jit-ready-fd",
++                        jitReadyReadFd.get());
++
+   DarwinObjectPtr<xpc_object_t> environDict =
+-      AdoptDarwinObject(xpc_dictionary_create_empty());
++      AdoptDarwinObject(xpc_dictionary_create(nullptr, nullptr, 0));
+   for (auto& [envKey, envValue] : mLaunchOptions->env_map) {
+     xpc_dictionary_set_string(environDict.get(), envKey.c_str(),
+                               envValue.c_str());
+@@ -1417,7 +1499,7 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+   xpc_dictionary_set_fd(bootstrapMessage.get(), "stderr", STDERR_FILENO);
+ 
+   DarwinObjectPtr<xpc_object_t> argsArray =
+-      AdoptDarwinObject(xpc_array_create_empty());
++      AdoptDarwinObject(xpc_array_create(nullptr, 0));
+   for (auto& argv : mChildArgs.mArgs) {
+     xpc_array_set_string(argsArray.get(), XPC_ARRAY_APPEND, argv.c_str());
+   }
+@@ -1425,7 +1507,7 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+   xpc_dictionary_set_value(bootstrapMessage.get(), "argv", argsArray.get());
+ 
+   DarwinObjectPtr<xpc_object_t> fdsArray =
+-      AdoptDarwinObject(xpc_array_create_empty());
++      AdoptDarwinObject(xpc_array_create(nullptr, 0));
+   for (auto& file : mChildArgs.mFiles) {
+     xpc_array_set_fd(fdsArray.get(), XPC_ARRAY_APPEND, file.get());
+   }
+@@ -1433,12 +1515,12 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+   xpc_dictionary_set_value(bootstrapMessage.get(), "fds", fdsArray.get());
+ 
+   DarwinObjectPtr<xpc_object_t> sendRightsArray =
+-      AdoptDarwinObject(xpc_array_create_empty());
++      AdoptDarwinObject(xpc_array_create(nullptr, 0));
+   for (auto& sendRight : mChildArgs.mSendRights) {
+     // NOTE: As iOS doesn't expose an xpc_array_set_mach_send function, send
+     // rights are wrapped with single-key dictionaries.
+     DarwinObjectPtr<xpc_object_t> sendRightWrapper =
+-        AdoptDarwinObject(xpc_dictionary_create_empty());
++        AdoptDarwinObject(xpc_dictionary_create(nullptr, nullptr, 0));
+     xpc_dictionary_set_mach_send(sendRightWrapper.get(), "port",
+                                  sendRight.get());
+     xpc_array_set_value(sendRightsArray.get(), XPC_ARRAY_APPEND,
+@@ -1450,34 +1532,36 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+                            sendRightsArray.get());
+ 
+   auto promise = MakeRefPtr<ProcessLaunchPromise::Private>(__func__);
+-  ExtensionKitProcess::StartProcess(kind, [self = RefPtr{this}, promise,
+-                                           bootstrapMessage =
+-                                               std::move(bootstrapMessage)](
+-                                              Result<ExtensionKitProcess,
+-                                                     LaunchError>&& result) {
++  auto didSettle = std::make_shared<std::atomic<bool>>(false);
++  NSExtensionProcess::StartProcess([self = RefPtr{this}, promise, didSettle,
++                                    bootstrapMessage =
++                                        std::move(bootstrapMessage)](
++                                       Result<NSExtensionProcess, LaunchError>&&
++                                           result) {
+     if (result.isErr()) {
+-      CHROMIUM_LOG(ERROR) << "ExtensionKitProcess::StartProcess failed";
+-      promise->Reject(result.unwrapErr(), __func__);
++      CHROMIUM_LOG(ERROR) << "NSExtensionProcess::StartProcess failed";
++      if (!didSettle->exchange(true, std::memory_order_relaxed)) {
++        promise->Reject(result.unwrapErr(), __func__);
++      }
+       return;
+     }
+ 
+     auto process = result.unwrap();
++    auto settleState = didSettle;
+     self->mResults.mForegroundCapabilityGrant =
+         process.GrantForegroundCapability();
+     self->mResults.mXPCConnection = process.MakeLibXPCConnection();
+-    self->mResults.mExtensionKitProcess = Some(std::move(process));
+-
+-    // We don't actually use the event handler for anything other than
+-    // watching for errors. Once the promise is resolved, this becomes a
+-    // no-op.
+-    xpc_connection_set_event_handler(self->mResults.mXPCConnection.get(), ^(
+-                                         xpc_object_t event) {
+-      if (!event || xpc_get_type(event) == XPC_TYPE_ERROR) {
+-        CHROMIUM_LOG(WARNING) << "XPC connection received encountered an error";
+-        promise->Reject(LaunchError("xpc_connection_event_handler"), __func__);
++    self->mResults.mNSExtensionProcess = Some(std::move(process));
++
++    if (!self->mResults.mXPCConnection) {
++      CHROMIUM_LOG(ERROR)
++          << "Failed to acquire libxpc connection from extension process";
++      if (!didSettle->exchange(true, std::memory_order_relaxed)) {
++        promise->Reject(LaunchError("NSExtensionProcess::MakeLibXPCConnection"),
++                        __func__);
+       }
+-    });
+-    xpc_connection_resume(self->mResults.mXPCConnection.get());
++      return;
++    }
+ 
+     // Send our bootstrap message to the content and wait for it to reply with
+     // the task port before resolving.
+@@ -1487,22 +1571,28 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+     xpc_connection_send_message_with_reply(
+         self->mResults.mXPCConnection.get(), bootstrapMessage.get(), nullptr,
+         ^(xpc_object_t reply) {
+-          if (xpc_get_type(reply) == XPC_TYPE_ERROR) {
++          xpc_type_t replyType = reply ? xpc_get_type(reply) : XPC_TYPE_ERROR;
++
++          if (replyType == XPC_TYPE_ERROR) {
+             CHROMIUM_LOG(ERROR)
+                 << "Got error sending XPC bootstrap message to child";
+-            promise->Reject(
+-                LaunchError("xpc_connection_send_message_with_reply error"),
+-                __func__);
++            if (!settleState->exchange(true, std::memory_order_relaxed)) {
++              promise->Reject(
++                  LaunchError("xpc_connection_send_message_with_reply error"),
++                  __func__);
++            }
+             return;
+           }
+ 
+-          if (xpc_get_type(reply) != XPC_TYPE_DICTIONARY) {
++          if (replyType != XPC_TYPE_DICTIONARY) {
+             CHROMIUM_LOG(ERROR)
+                 << "Unexpected reply type for bootstrap message from child";
+-            promise->Reject(
+-                LaunchError(
+-                    "xpc_connection_send_message_with_reply non-dictionary"),
+-                __func__);
++            if (!settleState->exchange(true, std::memory_order_relaxed)) {
++              promise->Reject(
++                  LaunchError(
++                      "xpc_connection_send_message_with_reply non-dictionary"),
++                  __func__);
++            }
+             return;
+           }
+ 
+@@ -1515,10 +1605,30 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+           // this point, so we should be able to trust it.
+           pid_t pid =
+               static_cast<pid_t>(xpc_dictionary_get_int64(reply, "pid"));
+-          CHROMIUM_LOG(INFO) << "ExtensionKit process started, pid: " << pid;
++          CHROMIUM_LOG(INFO) << "Extension process started, pid: " << pid;
++          const char* processType =
++              XRE_GeckoProcessTypeToString(self->mProcessType);
++          fprintf(stderr,
++                  "REYNARD_DEBUG: Extension process started, pid=%d, type=%s\n",
++                  static_cast<int>(pid), processType);
++          fflush(stderr);
++
++          // REYNARD: Register pipe
++          {
++            StaticMutexAutoLock lock(sChildJITPipeMutex);
++            sChildJITPipeWriters.insert_or_assign(
++                static_cast<int32_t>(pid),
++                std::move(self->mJITReadySignalWriteFd));
++          }
++
++          // REYNARD: Notify child process start
++          mozilla::widget::NotifyChildProcessStarted(static_cast<int32_t>(pid),
++                                                     processType);
+ 
+           self->mResults.mHandle = pid;
+-          promise->Resolve(std::move(self->mResults), __func__);
++          if (!settleState->exchange(true, std::memory_order_relaxed)) {
++            promise->Resolve(std::move(self->mResults), __func__);
++          }
+         });
+   });
+ 

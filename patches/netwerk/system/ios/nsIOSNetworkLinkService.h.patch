@@ -1,0 +1,72 @@
+diff --git a/netwerk/system/ios/nsIOSNetworkLinkService.h b/netwerk/system/ios/nsIOSNetworkLinkService.h
+new file mode 100644
+index 000000000000..9b9546af5be4
+--- /dev/null
++++ b/netwerk/system/ios/nsIOSNetworkLinkService.h
+@@ -0,0 +1,66 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef NSIOSNETWORKLINKSERVICE_H_
++#define NSIOSNETWORKLINKSERVICE_H_
++
++#include "mozilla/Mutex.h"
++#include "mozilla/net/DNS.h"
++#include "nsIObserver.h"
++#include "nsINetworkLinkService.h"
++#include "nsString.h"
++#include "nsTArray.h"
++
++#include <Network/Network.h>
++#include <dispatch/dispatch.h>
++
++class nsIOSNetworkLinkService final : public nsINetworkLinkService,
++                                      public nsIObserver {
++ public:
++  NS_DECL_THREADSAFE_ISUPPORTS
++  NS_DECL_NSINETWORKLINKSERVICE
++  NS_DECL_NSIOBSERVER
++
++  nsIOSNetworkLinkService();
++
++  nsresult Init();
++  nsresult Shutdown();
++
++  struct PathState {
++    bool mLinkUp = true;
++    bool mStatusKnown = false;
++    bool mExpensive = false;
++    bool mConstrained = false;
++    bool mHasIPv4 = false;
++    bool mHasIPv6 = false;
++    bool mVPNDetected = false;
++    bool mProxyDetected = false;
++    uint32_t mLinkType = nsINetworkLinkService::LINK_TYPE_UNKNOWN;
++    nsCString mNetworkID;
++  };
++
++ private:
++  virtual ~nsIOSNetworkLinkService();
++
++  void ProcessPathUpdate(nw_path_t aPath);
++  nsCString NetworkIDForPath(nw_path_t aPath, PathState& aState);
++  bool VPNDetectedForPath(nw_path_t aPath);
++  bool ProxyDetected();
++  void UpdateDNSConfig();
++  void NotifyObservers(const char* aTopic, const char* aData);
++
++  mozilla::Mutex mMutex;
++  PathState mState MOZ_GUARDED_BY(mMutex);
++  nsTArray<nsCString> mDNSSuffixList MOZ_GUARDED_BY(mMutex);
++  nsTArray<mozilla::net::NetAddr> mResolvers MOZ_GUARDED_BY(mMutex);
++
++  nw_path_monitor_t mMonitor = nullptr;
++  nw_path_t mPath = nullptr;
++  dispatch_queue_t mQueue = nullptr;
++};
++
++#endif  // NSIOSNETWORKLINKSERVICE_H_

@@ -1,0 +1,377 @@
+diff --git a/media/libcubeb/src/cubeb_audiounit_ios.mm b/media/libcubeb/src/cubeb_audiounit_ios.mm
+new file mode 100644
+index 000000000000..39461c54048a
+--- /dev/null
++++ b/media/libcubeb/src/cubeb_audiounit_ios.mm
+@@ -0,0 +1,371 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#include <string.h>
++
++#if defined(__IPHONE_14_0) && (__IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_14_0)
++#  import <AVFoundation/AVFoundation.h>
++#  include "cubeb/cubeb.h"
++
++namespace {
++
++static NSMutableDictionary<NSNumber*, NSString*>* cubeb_ios_token_to_uid() {
++  static NSMutableDictionary<NSNumber*, NSString*>* sTokenToUID;
++  static dispatch_once_t onceToken;
++  dispatch_once(&onceToken, ^{
++    sTokenToUID = [[NSMutableDictionary alloc] init];
++  });
++  return sTokenToUID;
++}
++
++static NSMutableDictionary<NSString*, NSNumber*>* cubeb_ios_uid_to_token() {
++  static NSMutableDictionary<NSString*, NSNumber*>* sUIDToToken;
++  static dispatch_once_t onceToken;
++  dispatch_once(&onceToken, ^{
++    sUIDToToken = [[NSMutableDictionary alloc] init];
++  });
++  return sUIDToToken;
++}
++
++static uint32_t cubeb_ios_token_for_uid(NSString* aUID) {
++  if (!aUID.length) {
++    return 0;
++  }
++  @synchronized([AVAudioSession class]) {
++    NSNumber* token = cubeb_ios_uid_to_token()[aUID];
++    if (token) {
++      return token.unsignedIntValue;
++    }
++    static uint32_t sNextToken = 1;
++    token = @(sNextToken++);
++    cubeb_ios_uid_to_token()[aUID] = token;
++    cubeb_ios_token_to_uid()[token] = aUID;
++    return token.unsignedIntValue;
++  }
++}
++
++static NSString* cubeb_ios_uid_for_token(uint32_t aToken) {
++  if (!aToken) {
++    return nil;
++  }
++  @synchronized([AVAudioSession class]) {
++    return cubeb_ios_token_to_uid()[@(aToken)];
++  }
++}
++
++static char* cubeb_ios_copy_string(NSString* aString) {
++  const char* utf8 = aString.UTF8String ?: "";
++  size_t length = strlen(utf8) + 1;
++  char* copy = new char[length];
++  memcpy(copy, utf8, length);
++  return copy;
++}
++
++static uint32_t cubeb_ios_input_channels(AVAudioSessionPortDescription* aPort) {
++  return aPort.channels.count > 0 ? static_cast<uint32_t>(aPort.channels.count)
++                                  : 1;
++}
++
++static uint32_t cubeb_ios_output_channels(AVAudioSessionPortDescription* aPort,
++                                          AVAudioSession* aSession) {
++  if (aPort.channels.count > 0) {
++    return static_cast<uint32_t>(aPort.channels.count);
++  }
++  if (aSession.maximumOutputNumberOfChannels > 0) {
++    return static_cast<uint32_t>(aSession.maximumOutputNumberOfChannels);
++  }
++  return 2;
++}
++
++static void cubeb_ios_fill_input_device(cubeb_device_info* aDevice,
++                                        AVAudioSessionPortDescription* aPort,
++                                        NSString* aPreferredUID,
++                                        uint32_t aSampleRate) {
++  NSString* uid = aPort.UID.length ? aPort.UID : aPort.portName;
++  NSString* name = aPort.portName.length ? aPort.portName : uid;
++  uint32_t token = cubeb_ios_token_for_uid(uid);
++  uint32_t sampleRate = aSampleRate ? aSampleRate : 44100;
++
++  memset(aDevice, 0, sizeof(*aDevice));
++  aDevice->devid = reinterpret_cast<cubeb_devid>(static_cast<uintptr_t>(token));
++  aDevice->device_id = cubeb_ios_copy_string(uid);
++  aDevice->friendly_name = cubeb_ios_copy_string(name);
++  aDevice->group_id = cubeb_ios_copy_string(uid);
++  aDevice->vendor_name = cubeb_ios_copy_string(@"Apple");
++  aDevice->type = CUBEB_DEVICE_TYPE_INPUT;
++  aDevice->state = CUBEB_DEVICE_STATE_ENABLED;
++  aDevice->preferred = [uid isEqualToString:aPreferredUID]
++                           ? CUBEB_DEVICE_PREF_ALL
++                           : CUBEB_DEVICE_PREF_NONE;
++  aDevice->format = static_cast<cubeb_device_fmt>(CUBEB_DEVICE_FMT_ALL);
++  aDevice->default_format = CUBEB_DEVICE_FMT_F32NE;
++  aDevice->max_channels = cubeb_ios_input_channels(aPort);
++  aDevice->default_rate = sampleRate;
++  aDevice->max_rate = sampleRate;
++  aDevice->min_rate = sampleRate;
++  aDevice->latency_lo = sampleRate / 100;
++  aDevice->latency_hi = sampleRate / 10;
++}
++
++static void cubeb_ios_fill_output_device(cubeb_device_info* aDevice,
++                                         AVAudioSessionPortDescription* aPort,
++                                         NSString* aPreferredUID,
++                                         uint32_t aSampleRate,
++                                         AVAudioSession* aSession) {
++  NSString* uid = aPort.UID.length ? aPort.UID : aPort.portName;
++  NSString* name = aPort.portName.length ? aPort.portName : uid;
++  uint32_t token = cubeb_ios_token_for_uid(uid);
++  uint32_t sampleRate = aSampleRate ? aSampleRate : 44100;
++
++  memset(aDevice, 0, sizeof(*aDevice));
++  aDevice->devid = reinterpret_cast<cubeb_devid>(static_cast<uintptr_t>(token));
++  aDevice->device_id = cubeb_ios_copy_string(uid);
++  aDevice->friendly_name = cubeb_ios_copy_string(name);
++  aDevice->group_id = cubeb_ios_copy_string(uid);
++  aDevice->vendor_name = cubeb_ios_copy_string(@"Apple");
++  aDevice->type = CUBEB_DEVICE_TYPE_OUTPUT;
++  aDevice->state = CUBEB_DEVICE_STATE_ENABLED;
++  aDevice->preferred = [uid isEqualToString:aPreferredUID]
++                           ? CUBEB_DEVICE_PREF_ALL
++                           : CUBEB_DEVICE_PREF_NONE;
++  aDevice->format = static_cast<cubeb_device_fmt>(CUBEB_DEVICE_FMT_ALL);
++  aDevice->default_format = CUBEB_DEVICE_FMT_F32NE;
++  aDevice->max_channels = cubeb_ios_output_channels(aPort, aSession);
++  aDevice->default_rate = sampleRate;
++  aDevice->max_rate = sampleRate;
++  aDevice->min_rate = sampleRate;
++  aDevice->latency_lo = sampleRate / 100;
++  aDevice->latency_hi = sampleRate / 10;
++}
++
++}  // namespace
++
++extern "C" void cubeb_ios_activate_audio_session(
++    bool aRecording, uint32_t aPreferredOutputChannels) {
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  NSError* error = nil;
++  NSString* category = aRecording ? AVAudioSessionCategoryPlayAndRecord
++                                  : AVAudioSessionCategoryPlayback;
++  NSString* mode =
++      aRecording ? AVAudioSessionModeDefault : AVAudioSessionModeMoviePlayback;
++  AVAudioSessionCategoryOptions options = 0;
++  if (aRecording) {
++    options = AVAudioSessionCategoryOptionDefaultToSpeaker |
++              AVAudioSessionCategoryOptionAllowBluetoothHFP |
++              AVAudioSessionCategoryOptionAllowBluetoothA2DP |
++              AVAudioSessionCategoryOptionAllowAirPlay;
++  }
++
++  [session setCategory:category mode:mode options:options error:&error];
++  if (aPreferredOutputChannels && session.maximumOutputNumberOfChannels > 0) {
++    NSInteger channels = MIN(static_cast<NSInteger>(aPreferredOutputChannels),
++                             session.maximumOutputNumberOfChannels);
++    if (channels > 0) {
++      [session setPreferredOutputNumberOfChannels:channels error:nil];
++    }
++  }
++  [session setActive:YES error:&error];
++}
++
++extern "C" uint32_t cubeb_ios_session_sample_rate(void) {
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  return static_cast<uint32_t>(session.sampleRate);
++}
++
++extern "C" uint32_t cubeb_ios_copy_available_inputs(
++    cubeb_device_info** aDevices) {
++  if (!aDevices) {
++    return 0;
++  }
++
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  NSArray<AVAudioSessionPortDescription*>* availableInputs =
++      session.availableInputs;
++  if (!availableInputs.count) {
++    *aDevices = nullptr;
++    return 0;
++  }
++
++  NSString* preferredUID = session.preferredInput.UID;
++  if (!preferredUID.length) {
++    preferredUID = session.currentRoute.inputs.firstObject.UID;
++  }
++
++  cubeb_device_info* devices = new cubeb_device_info[availableInputs.count];
++  uint32_t sampleRate = cubeb_ios_session_sample_rate();
++  for (NSUInteger index = 0; index < availableInputs.count; ++index) {
++    AVAudioSessionPortDescription* port = availableInputs[index];
++    cubeb_ios_fill_input_device(&devices[index], port, preferredUID,
++                                sampleRate);
++  }
++
++  *aDevices = devices;
++  return static_cast<uint32_t>(availableInputs.count);
++}
++
++extern "C" uint32_t cubeb_ios_copy_available_outputs(
++    cubeb_device_info** aDevices) {
++  if (!aDevices) {
++    return 0;
++  }
++
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  NSArray<AVAudioSessionPortDescription*>* outputs =
++      session.currentRoute.outputs;
++  if (!outputs.count) {
++    *aDevices = nullptr;
++    return 0;
++  }
++
++  NSString* preferredUID = outputs.firstObject.UID;
++  cubeb_device_info* devices = new cubeb_device_info[outputs.count];
++  uint32_t sampleRate = cubeb_ios_session_sample_rate();
++  for (NSUInteger index = 0; index < outputs.count; ++index) {
++    AVAudioSessionPortDescription* port = outputs[index];
++    cubeb_ios_fill_output_device(&devices[index], port, preferredUID,
++                                 sampleRate, session);
++  }
++
++  *aDevices = devices;
++  return static_cast<uint32_t>(outputs.count);
++}
++
++extern "C" uint32_t cubeb_ios_max_output_channel_count(void) {
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  if (session.maximumOutputNumberOfChannels > 0) {
++    return static_cast<uint32_t>(session.maximumOutputNumberOfChannels);
++  }
++  return 2;
++}
++
++extern "C" uint32_t cubeb_ios_output_latency_frames(void) {
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  double sampleRate = session.sampleRate;
++  if (sampleRate <= 0) {
++    sampleRate = 44100;
++  }
++  NSTimeInterval latency = session.outputLatency + session.IOBufferDuration;
++  if (latency <= 0) {
++    return 0;
++  }
++  return static_cast<uint32_t>(latency * sampleRate);
++}
++
++extern "C" bool cubeb_ios_copy_current_device_names(char** aInputName,
++                                                    char** aOutputName) {
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  if (aInputName) {
++    *aInputName = nullptr;
++    AVAudioSessionPortDescription* input =
++        session.currentRoute.inputs.firstObject;
++    if (input.portName.length) {
++      *aInputName = cubeb_ios_copy_string(input.portName);
++    }
++  }
++  if (aOutputName) {
++    *aOutputName = nullptr;
++    AVAudioSessionPortDescription* output =
++        session.currentRoute.outputs.firstObject;
++    if (output.portName.length) {
++      *aOutputName = cubeb_ios_copy_string(output.portName);
++    }
++  }
++  return true;
++}
++
++extern "C" bool cubeb_ios_set_preferred_input(cubeb_devid aDeviceId) {
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  uint32_t token =
++      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(aDeviceId));
++  NSString* targetUID = cubeb_ios_uid_for_token(token);
++  AVAudioSessionPortDescription* preferredInput = nil;
++
++  if (targetUID.length) {
++    for (AVAudioSessionPortDescription* input in session.availableInputs) {
++      if ([input.UID isEqualToString:targetUID]) {
++        preferredInput = input;
++        break;
++      }
++    }
++    if (!preferredInput) {
++      return false;
++    }
++  }
++
++  NSError* error = nil;
++  BOOL success = [session setPreferredInput:preferredInput error:&error];
++  if (!success) {
++    return false;
++  }
++  return true;
++}
++#else
++#  import <AudioToolbox/AudioToolbox.h>
++
++static void cubeb_ios_ensure_audio_session_initialized() {
++  static bool sInitialized = false;
++  if (sInitialized) {
++    return;
++  }
++  AudioSessionInitialize(nullptr, nullptr, nullptr, nullptr);
++  sInitialized = true;
++}
++
++extern "C" void cubeb_ios_activate_audio_session(bool aRecording, uint32_t) {
++  cubeb_ios_ensure_audio_session_initialized();
++  UInt32 category = aRecording ? kAudioSessionCategory_PlayAndRecord
++                               : kAudioSessionCategory_MediaPlayback;
++  AudioSessionSetProperty(kAudioSessionProperty_AudioCategory, sizeof(category),
++                          &category);
++  AudioSessionSetActive(true);
++}
++
++extern "C" uint32_t cubeb_ios_session_sample_rate(void) {
++  cubeb_ios_ensure_audio_session_initialized();
++  Float64 sample_rate = 0.0;
++  UInt32 size = sizeof(sample_rate);
++  if (AudioSessionGetProperty(kAudioSessionProperty_CurrentHardwareSampleRate,
++                              &size, &sample_rate) != noErr ||
++      sample_rate <= 0.0) {
++    return 44100;
++  }
++  return static_cast<uint32_t>(sample_rate);
++}
++
++extern "C" uint32_t cubeb_ios_copy_available_inputs(
++    cubeb_device_info** aDevices) {
++  if (aDevices) {
++    *aDevices = nullptr;
++  }
++  return 0;
++}
++
++extern "C" uint32_t cubeb_ios_copy_available_outputs(
++    cubeb_device_info** aDevices) {
++  if (aDevices) {
++    *aDevices = nullptr;
++  }
++  return 0;
++}
++
++extern "C" uint32_t cubeb_ios_max_output_channel_count(void) { return 2; }
++
++extern "C" uint32_t cubeb_ios_output_latency_frames(void) { return 0; }
++
++extern "C" bool cubeb_ios_copy_current_device_names(char** aInputName,
++                                                    char** aOutputName) {
++  if (aInputName) {
++    *aInputName = nullptr;
++  }
++  if (aOutputName) {
++    *aOutputName = nullptr;
++  }
++  return true;
++}
++
++extern "C" bool cubeb_ios_set_preferred_input(cubeb_devid) { return true; }
++#endif

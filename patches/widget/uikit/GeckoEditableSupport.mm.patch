@@ -1,0 +1,3721 @@
+diff --git a/widget/uikit/GeckoEditableSupport.mm b/widget/uikit/GeckoEditableSupport.mm
+new file mode 100644
+index 000000000000..c09753c091c5
+--- /dev/null
++++ b/widget/uikit/GeckoEditableSupport.mm
+@@ -0,0 +1,3715 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#import <UIKit/UIKit.h>
++
++#include <algorithm>
++
++#include "GeckoEditableSupport.h"
++#include "nsWindow.h"
++#include "TextInputHandler.h"
++#include "UIKitUtils.h"
++
++#include "mozilla/EventForwards.h"
++#include "mozilla/MacStringHelpers.h"
++#include "mozilla/MiscEvents.h"
++#include "mozilla/TextEvents.h"
++#include "nsIWidget.h"
++#include "nsString.h"
++
++using namespace mozilla;
++using namespace mozilla::widget;
++using mozilla::widget::UIKitUtils;
++
++namespace {
++
++constexpr CGFloat kHandleHitRadius = 44.0;
++constexpr CGFloat kFallbackCharWidth = 8.0;
++
++struct EndpointRects {
++  CGRect startRect;
++  CGRect endRect;
++  bool hasStart;
++  bool hasEnd;
++};
++
++}  // namespace
++
++// MARK: New things
++
++@implementation ChildViewTextPosition
++
+++ (instancetype)positionWithOffset:(NSUInteger)aOffset {
++  ChildViewTextPosition* position =
++      [[[ChildViewTextPosition alloc] init] autorelease];
++  position.offset = aOffset;
++  return position;
++}
++@end
++
++@implementation ChildViewTextRange
++@synthesize startPosition = _startPosition;
++@synthesize endPosition = _endPosition;
++
+++ (instancetype)rangeWithStart:(ChildViewTextPosition*)aStart
++                           end:(ChildViewTextPosition*)aEnd {
++  ChildViewTextRange* range = [[[ChildViewTextRange alloc] init] autorelease];
++  range.startPosition = aStart;
++  range.endPosition = aEnd;
++  return range;
++}
++
++- (UITextPosition*)start {
++  return _startPosition;
++}
++
++- (UITextPosition*)end {
++  return _endPosition;
++}
++
++- (BOOL)isEmpty {
++  return _startPosition.offset == _endPosition.offset;
++}
++
++- (void)dealloc {
++  [_startPosition release];
++  [_endPosition release];
++  [super dealloc];
++}
++@end
++
++@implementation ChildViewTextSelectionRect
++
+++ (instancetype)selectionRectWithRect:(CGRect)aRect
++                        containsStart:(BOOL)aContainsStart
++                          containsEnd:(BOOL)aContainsEnd {
++  ChildViewTextSelectionRect* selectionRect =
++      [[[ChildViewTextSelectionRect alloc] init] autorelease];
++  selectionRect.rectValue = aRect;
++  selectionRect.writingDirectionValue = NSWritingDirectionNatural;
++  selectionRect.containsStartValue = aContainsStart;
++  selectionRect.containsEndValue = aContainsEnd;
++  selectionRect.verticalValue = NO;
++  return selectionRect;
++}
++
++- (CGRect)rect {
++  return _rectValue;
++}
++
++- (NSWritingDirection)writingDirection {
++  return _writingDirectionValue;
++}
++
++- (BOOL)containsStart {
++  return _containsStartValue;
++}
++
++- (BOOL)containsEnd {
++  return _containsEndValue;
++}
++
++- (BOOL)isVertical {
++  return _verticalValue;
++}
++@end
++
++// MARK: - TextInputHandler
++
++namespace mozilla::widget {
++
++// Queries Gecko for the current selection range.
++bool TextInputHandler::SelectedRange(NSRange& aRange) {
++  aRange = NSMakeRange(NSNotFound, 0);
++
++  if (mSelectedRangeOverride.isSome()) {
++    aRange = *mSelectedRangeOverride;
++    return true;
++  }
++
++  if (Destroyed()) {
++    return false;
++  }
++
++  WidgetQueryContentEvent query(true, eQuerySelectedText, mWidget);
++  query.InitForQuerySelectedText(SelectionType::eNormal);
++  mWidget->DispatchWindowEvent(query);
++  if (query.DidNotFindSelection()) {
++    return false;
++  }
++
++  const uint32_t offset = query.mReply->StartOffset();
++  const uint32_t length = query.mReply->DataRef().Length();
++  aRange = NSMakeRange(offset, length);
++  return true;
++}
++
++bool TextInputHandler::MarkedRange(NSRange& aRange) {
++  aRange = HasMarkedText() ? mMarkedRange : NSMakeRange(NSNotFound, 0);
++  return HasMarkedText();
++}
++
++// Updates Gecko's selection range.
++bool TextInputHandler::SetSelectedRange(const NSRange& aRange) {
++  if (Destroyed() || aRange.location == NSNotFound) {
++    return false;
++  }
++
++  if (aRange.location > UINT32_MAX || aRange.length > UINT32_MAX) {
++    return false;
++  }
++
++  WidgetSelectionEvent event(true, eSetSelection, mWidget);
++  event.mOffset = static_cast<uint32_t>(aRange.location);
++  event.mLength = static_cast<uint32_t>(aRange.length);
++  event.mExpandToClusterBoundary = false;
++  mWidget->DispatchWindowEvent(event);
++  return event.mSucceeded;
++}
++
++// Returns the full editable text length.
++bool TextInputHandler::TextLength(uint32_t& aLength) {
++  aLength = 0;
++  nsString text;
++  if (!TextInRange(NSMakeRange(0, UINT32_MAX), text)) {
++    return false;
++  }
++  aLength = text.Length();
++  return true;
++}
++
++// Reads Gecko text for a document range.
++bool TextInputHandler::TextInRange(const NSRange& aRange, nsString& aText) {
++  aText.Truncate();
++
++  if (Destroyed() || aRange.location == NSNotFound) {
++    return false;
++  }
++
++  if (HasMarkedText() && aRange.location >= mMarkedRange.location &&
++      aRange.length <= mMarkedRange.length) {
++    const NSUInteger relativeStart = aRange.location - mMarkedRange.location;
++    if (relativeStart <= mMarkedRange.length - aRange.length) {
++      aText.Assign(Substring(mMarkedText, relativeStart, aRange.length));
++      return true;
++    }
++  }
++
++  if (aRange.location > UINT32_MAX || aRange.length > UINT32_MAX) {
++    return false;
++  }
++
++  WidgetQueryContentEvent query(true, eQueryTextContent, mWidget);
++  query.InitForQueryTextContent(static_cast<uint32_t>(aRange.location),
++                                static_cast<uint32_t>(aRange.length));
++  mWidget->DispatchWindowEvent(query);
++  if (query.Failed()) {
++    return false;
++  }
++
++  aText = query.mReply->DataRef();
++  return true;
++}
++
++// Replaces Gecko text inside a document range.
++bool TextInputHandler::ReplaceRange(const NSRange& aRange, NSString* aText) {
++  if (Destroyed() || aRange.location == NSNotFound) {
++    return false;
++  }
++
++  if (!SetSelectedRange(aRange)) {
++    return false;
++  }
++
++  nsString replacement;
++  CopyNSStringToXPCOMString(aText ?: @"", replacement);
++
++  if (replacement.IsEmpty()) {
++    return RunCommand(eContentCommandDelete, false);
++  }
++
++  WidgetContentCommandEvent event(true, eContentCommandInsertText, mWidget);
++  event.mString = Some(replacement);
++  mWidget->DispatchWindowEvent(event);
++  return event.mSucceeded;
++}
++
++// Queries Gecko for the rect covering a document range.
++bool TextInputHandler::TextRectForRange(const NSRange& aRange,
++                                        LayoutDeviceIntRect& aRect) {
++  if (Destroyed() || aRange.location == NSNotFound) {
++    return false;
++  }
++
++  if (aRange.length == 0) {
++    return CaretRectForOffset(aRange.location, aRect);
++  }
++
++  if (aRange.location > UINT32_MAX || aRange.length > UINT32_MAX) {
++    return false;
++  }
++
++  WidgetQueryContentEvent query(true, eQueryTextRect, mWidget);
++  query.InitForQueryTextRect(static_cast<uint32_t>(aRange.location),
++                             static_cast<uint32_t>(aRange.length));
++  mWidget->DispatchWindowEvent(query);
++  if (query.Failed()) {
++    return false;
++  }
++
++  aRect = query.mReply->mRect;
++  return true;
++}
++
++// Queries Gecko for the caret rect at a document offset.
++bool TextInputHandler::CaretRectForOffset(uint32_t aOffset,
++                                          LayoutDeviceIntRect& aRect) {
++  if (Destroyed()) {
++    return false;
++  }
++
++  WidgetQueryContentEvent query(true, eQueryCaretRect, mWidget);
++  query.InitForQueryCaretRect(aOffset);
++  mWidget->DispatchWindowEvent(query);
++  if (query.Failed()) {
++    return false;
++  }
++
++  aRect = query.mReply->mRect;
++  return true;
++}
++
++// Queries Gecko for the editable region rect.
++bool TextInputHandler::EditorRect(LayoutDeviceIntRect& aRect) {
++  if (Destroyed()) {
++    return false;
++  }
++
++  WidgetQueryContentEvent query(true, eQueryEditorRect, mWidget);
++  mWidget->DispatchWindowEvent(query);
++  if (query.Failed() || !query.mReply->mIsEditableContent) {
++    return false;
++  }
++
++  aRect = query.mReply->mRect;
++  return true;
++}
++
++// Runs a Gecko content command.
++bool TextInputHandler::RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
++                                  bool* aIsEnabled) {
++  if (Destroyed()) {
++    if (aIsEnabled) {
++      *aIsEnabled = false;
++    }
++    return false;
++  }
++
++  WidgetContentCommandEvent event(true, aMessage, mWidget, aOnlyEnabledCheck);
++  mWidget->DispatchWindowEvent(event);
++  if (aIsEnabled) {
++    *aIsEnabled = event.mIsEnabled;
++  }
++  return event.mSucceeded;
++}
++
++}  // namespace mozilla::widget
++
++// MARK: - ChildView
++
++// In here, I separated the editable support code into two paths - modern and
++// legacy. This is because Apple introduced quite a few new APIs for text
++// editing in iOS 16 and 17, and on these versions the old APIs for older
++// versions just don't seem to work, so I have to maintain two separate code
++// paths so this could work on every iOS version that the browser support.
++// Also there are some touch/gestures differences (or conflicts?) on iOS 17+ as
++// well, so these have to be handled separately. Btw UIMenuController is
++// replaced with UIEditMenuInteraction on iOS 16, but seems like it continues to
++// work so I don't plan to use new API for that part just yet.
++
++// Things that aren't working yet:
++// - Dragging the spacebar to move the cursor to a different position.
++// - Triple-tapping to select a paragraph.
++// - Cross handle switching on newer path.
++// - Touch and hold to magnify the text, then move the insertion point by
++// dragging it.
++// - Tapping on an existing selection will only toggle the menu, not dismissing
++// it entirely.
++
++// See https://support.apple.com/en-vn/guide/iphone/iph1a9cae52c/ios
++
++@interface ChildView : UIView {
++ @public
++  // Redeclarations
++  nsWindow* mGeckoChild;
++  BOOL mWaitingForPaint;
++  NSMapTable<UITouch*, NSNumber*>* mTouches;
++  int mNextTouchID;
++  GeckoEditableState mEditable;
++  CALayer* mRootCALayer;
++  BOOL mIsUpdatingLayer;
++}
++@end
++
++// Shared APIs for both modern and legacy text interaction paths.
++@interface ChildView (Shared) <UIKeyInput,
++                               UITextInput,
++                               UITextInteractionDelegate>
++
++- (void)setupTextInput;
++- (void)teardownTextInput;
++- (widget::TextInputHandler*)textHandler;
++- (NSRange)selectedRange;
++- (NSUInteger)clampOffset:(NSUInteger)aOffset;
++- (NSUInteger)documentLength;
++- (ChildViewTextPosition*)textPosForPosition:(UITextPosition*)aPosition;
++- (ChildViewTextRange*)textRangeForTextRange:(UITextRange*)aRange;
++- (ChildViewTextRange*)textRangeForExactRange:(NSRange)aRange;
++- (ChildViewTextRange*)textRangeForRange:(NSRange)aRange;
++- (NSRange)rangeForTextRange:(UITextRange*)aRange;
++- (NSRange)deleteBackwardRangeInText:(NSString*)aText selection:(NSRange)aRange;
++- (void)resetHandleState;
++- (CGRect)selectionBounds;
++- (BOOL)clipToSelectionBounds:(CGRect*)aRect;
++- (BOOL)cachedHandleRect:(CGRect*)aRect
++               forOffset:(NSUInteger)aOffset
++                  handle:(GeckoSelectionHandle)aHandle;
++- (BOOL)caretRect:(CGRect*)aRect
++         atOffset:(NSUInteger)aOffset
++          handler:(widget::TextInputHandler*)aHandler;
++- (BOOL)handleRect:(CGRect*)aRect
++          atOffset:(NSUInteger)aOffset
++            handle:(GeckoSelectionHandle)aHandle
++           handler:(widget::TextInputHandler*)aHandler;
++- (BOOL)visibleHandleRect:(CGRect*)aRect
++                 atOffset:(NSUInteger)aOffset
++                   handle:(GeckoSelectionHandle)aHandle
++                  handler:(widget::TextInputHandler*)aHandler;
++- (EndpointRects)visibleHandleRectsForRange:(NSRange)aRange
++                                    handler:(widget::TextInputHandler*)aHandler;
++- (CGFloat)charWidthAtOffset:(NSUInteger)aOffset
++                   caretRect:(CGRect)aCaretRect
++                     handler:(widget::TextInputHandler*)aHandler;
++- (GeckoSelectionHandle)closestHandleToPoint:(CGPoint)aPoint
++                                       range:(NSRange)aRange
++                                     handler:
++                                         (widget::TextInputHandler*)aHandler;
++- (void)startHandleTrackingAtPoint:(CGPoint)aPoint
++                             range:(NSRange)aRange
++                           handler:(widget::TextInputHandler*)aHandler;
++- (void)computeLineBoundariesForOffset:(NSUInteger)aOffset
++                               handler:(widget::TextInputHandler*)aHandler;
++- (void)computeVerticalBoundariesForOffset:(NSUInteger)aOffset
++                                   handler:(widget::TextInputHandler*)aHandler;
++- (NSUInteger)findClosestOffsetToX:(CGFloat)aTargetX
++                       onLineStart:(NSUInteger)aLineStart
++                           lineEnd:(NSUInteger)aLineEnd
++                           handler:(widget::TextInputHandler*)aHandler;
++- (NSRange)deleteBackwardRangeWithHandler:(widget::TextInputHandler*)aHandler;
++- (void)updateTextInteractions;
++- (void)scheduleResponderBlur;
++- (void)cancelResponderBlur;
++- (void)applyResponderBlur;
++- (void)selectionGeometryChanged;
++- (void)applySelectionGeometryChange;
++- (void)scheduleEditSelectionUpdate;
++- (void)applyEditSelectionUpdate;
++- (void)updateEditMenu;
++
++@end
++
++// Modern text interaction APIs available on iOS 17 and later.
++@interface ChildView (Modern) <UIGestureRecognizerDelegate,
++                               UITextSelectionDisplayInteractionDelegate>
++
++- (void)setupModernTextInput;
++- (void)teardownModernTextInput;
++- (void)updateModernTextInteractions;
++- (void)updateSelectionActivation;
++- (void)updateHandleVisibility;
++- (void)refreshSelectionUI;
++- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer*)aGestureRecognizer;
++- (void)panSelectionHandle:(UIPanGestureRecognizer*)aRecognizer;
++
++@end
++
++@interface ChildView (Legacy)
++
++- (void)updateLegacyTextInteractions;
++- (void)setLegacyGrabbersHidden:(BOOL)aHidden;
++- (void)updateLegacyGrabbers;
++
++@end
++
++// Apparently, in simple terms, the Vietnamese keyboard works by checking the
++// typed characters for a word repeatedly to see if they can form a valid
++// Vietnamese word, then do some select / delete / insert magic to turn those
++// characters into the correct Vietnamese word. So the problem here is that
++// Gecko is lagging behind in terms of text updates, so the repeated checks and
++// edits would stay out of sync and produce incorrect results.
++
++// So the solution that I use here is to maintain a mirror of the text and
++// selection for the currently composing word, make UIKit interact with the
++// mirror instead. Once the composition is committed and Gecko's state catches
++// up, the mirror is cleared.
++
++@interface ChildView (Vietnamese)
++
++- (void)clearVietnameseBuffer;
++- (BOOL)hasVietnameseBuffer;
++- (BOOL)shouldUseVietnameseIMEPath;
++- (void)clearVietnameseMarkedRange;
++- (BOOL)ensureVietnameseBufferWithHandler:(widget::TextInputHandler*)aHandler;
++- (BOOL)tryClearSyncedVietnameseBufferWithHandler:
++    (widget::TextInputHandler*)aHandler;
++- (NSString*)vietnameseBufferTextInRange:(NSRange)aRange;
++- (NSRange)geckoRangeForVietnameseBufferRange:(NSRange)aRange;
++- (NSRange)geckoRangeForVisibleRange:(NSRange)aRange;
++- (void)replaceVietnameseBufferRange:(NSRange)aRange withText:(NSString*)aText;
++- (NSRange)vietnameseBufferDeleteBackwardRange;
++- (void)flushVietnamesePendingDelete;
++
++@end
++
++@interface ChildView (Korean)
++
++- (BOOL)isKoreanInputMode;
++- (void)clearKoreanCompositionState;
++- (BOOL)handleKoreanInsertText:(NSString*)aText
++                   withHandler:(widget::TextInputHandler*)aHandler;
++
++@end
++
++// MARK: - ChildView (Shared)
++
++@implementation ChildView (Shared)
++
++- (void)setupTextInput {
++  self.inputAssistantItem.leadingBarButtonGroups = @[];
++  self.inputAssistantItem.trailingBarButtonGroups = @[];
++
++  mEditable.mTokenizer =
++      [[UITextInputStringTokenizer alloc] initWithTextInput:self];
++  mEditable.mTextInputDelegate = nil;
++  mEditable.mMarkedTextStyle = nil;
++  mEditable.mEditableTextInteraction = nil;
++  mEditable.mNonEditableTextInteraction = nil;
++  mEditable.mSelectionDisplayInteraction = nil;
++  mEditable.mSelectionHandlePanRecognizer = nil;
++  mEditable.mTextInteractionInProgress = NO;
++  mEditable.mPendingSelectionGeometryRefresh = NO;
++  // The other Vietnamese fields are meaningful only while this buffer exists.
++  mEditable.mVietnameseBufferText = nil;
++  mEditable.mKoreanComposedText = nil;
++  [self resetHandleState];
++
++  mEditable.mEditableTextInteraction = [[UITextInteraction
++      textInteractionForMode:UITextInteractionModeEditable] retain];
++  mEditable.mEditableTextInteraction.textInput = self;
++  mEditable.mEditableTextInteraction.delegate = self;
++
++  mEditable.mNonEditableTextInteraction = [[UITextInteraction
++      textInteractionForMode:UITextInteractionModeNonEditable] retain];
++  mEditable.mNonEditableTextInteraction.textInput = self;
++  mEditable.mNonEditableTextInteraction.delegate = self;
++
++  [self setupModernTextInput];
++  [self updateTextInteractions];
++}
++
++- (void)teardownTextInput {
++  [mEditable.mTokenizer release];
++  mEditable.mTokenizer = nil;
++  [mEditable.mMarkedTextStyle release];
++  mEditable.mMarkedTextStyle = nil;
++  [mEditable.mEditableTextInteraction release];
++  mEditable.mEditableTextInteraction = nil;
++  [mEditable.mNonEditableTextInteraction release];
++  mEditable.mNonEditableTextInteraction = nil;
++  mEditable.mTextInteractionInProgress = NO;
++  // Drop any temporary Vietnamese mirror before releasing UIKit interactions.
++  [self clearVietnameseBuffer];
++  [self clearKoreanCompositionState];
++
++  [self teardownModernTextInput];
++  [self resetHandleState];
++}
++
++// Returns the live Gecko text-input bridge for this view.
++- (widget::TextInputHandler*)textHandler {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return nullptr;
++  }
++  return mGeckoChild->GetTextInputHandler();
++}
++
++- (NSRange)selectedRange {
++  NSRange range = NSMakeRange(0, 0);
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler || !handler->SelectedRange(range)) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++  return range;
++}
++
++- (NSUInteger)documentLength {
++  // During Vietnamese composition, answer length from the mirror so UIKit
++  // sees the text that the keyboard just edited, not stale Gecko state.
++  if ([self hasVietnameseBuffer]) {
++    return [mEditable.mVietnameseBufferText length];
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return 0;
++  }
++
++  uint32_t length = 0;
++  if (handler->TextLength(length)) {
++    return length;
++  }
++
++  return 0;
++}
++
++// Clamps an offset to the current document length.
++- (NSUInteger)clampOffset:(NSUInteger)aOffset {
++  NSUInteger length = [self documentLength];
++  return aOffset > length ? length : aOffset;
++}
++
++// The next 4 functions are just casting/conversion functions
++- (ChildViewTextPosition*)textPosForPosition:(UITextPosition*)aPosition {
++  if (!aPosition || ![aPosition isKindOfClass:[ChildViewTextPosition class]]) {
++    return nil;
++  }
++  return static_cast<ChildViewTextPosition*>(aPosition);
++}
++
++- (ChildViewTextRange*)textRangeForTextRange:(UITextRange*)aRange {
++  if (!aRange) {
++    return nil;
++  }
++
++  ChildViewTextPosition* start = [self textPosForPosition:aRange.start];
++  ChildViewTextPosition* end = [self textPosForPosition:aRange.end];
++  if (!start || !end) {
++    return nil;
++  }
++
++  return [ChildViewTextRange rangeWithStart:start end:end];
++}
++
++- (ChildViewTextRange*)textRangeForExactRange:(NSRange)aRange {
++  if (aRange.location == NSNotFound) {
++    return nil;
++  }
++
++  NSUInteger end = aRange.location;
++  if (aRange.location <= NSUIntegerMax - aRange.length) {
++    end = aRange.location + aRange.length;
++  }
++
++  ChildViewTextPosition* startPosition =
++      [ChildViewTextPosition positionWithOffset:aRange.location];
++  ChildViewTextPosition* endPosition =
++      [ChildViewTextPosition positionWithOffset:end];
++  return [ChildViewTextRange rangeWithStart:startPosition end:endPosition];
++}
++
++- (ChildViewTextRange*)textRangeForRange:(NSRange)aRange {
++  NSUInteger start = [self clampOffset:aRange.location];
++  NSUInteger end = [self clampOffset:aRange.location + aRange.length];
++  if (end < start) {
++    end = start;
++  }
++  ChildViewTextPosition* startPosition =
++      [ChildViewTextPosition positionWithOffset:start];
++  ChildViewTextPosition* endPosition =
++      [ChildViewTextPosition positionWithOffset:end];
++  return [ChildViewTextRange rangeWithStart:startPosition end:endPosition];
++}
++
++- (NSRange)rangeForTextRange:(UITextRange*)aRange {
++  ChildViewTextRange* textRange = [self textRangeForTextRange:aRange];
++  if (!textRange) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  NSUInteger start = textRange.startPosition.offset;
++  NSUInteger end = textRange.endPosition.offset;
++  if (end < start) {
++    NSUInteger tmp = start;
++    start = end;
++    end = tmp;
++  }
++
++  return NSMakeRange(start, end - start);
++}
++
++// Returns the exact composed-character range that deleteBackward should remove.
++- (NSRange)deleteBackwardRangeInText:(NSString*)aText
++                           selection:(NSRange)aRange {
++  if (!aText || aRange.location == NSNotFound) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  const NSUInteger textLength = [aText length];
++  const NSUInteger location = std::min(aRange.location, textLength);
++  const NSUInteger length = std::min(aRange.length, textLength - location);
++  if (length) {
++    return
++        [aText rangeOfComposedCharacterSequencesForRange:NSMakeRange(location,
++                                                                     length)];
++  }
++  if (location == 0) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  return [aText rangeOfComposedCharacterSequenceAtIndex:location - 1];
++}
++
++- (void)resetHandleState {
++  mEditable.mActiveSelectionHandle = GeckoSelectionHandleNone;
++  mEditable.mSelectionHandleAnchorOffset = NSNotFound;
++
++  // The shadow range here is the prediction to be applied to UIKit while a
++  // handle is being dragged. The reason that this is used is because Gecko's
++  // selection updates are lagged behind UIKit's, so without this the selection
++  // handles just end up flickering.
++  mEditable.mShadowSelectedRange = NSMakeRange(NSNotFound, 0);
++
++  mEditable.mShadowActiveHandleRect = CGRectZero;
++  mEditable.mShadowActiveHandleOffset = NSNotFound;
++  mEditable.mLineBoundaryStart = 0;
++  mEditable.mLineBoundaryEnd = NSUIntegerMax;
++  mEditable.mLineBoundariesComputed = NO;
++  mEditable.mVerticalBoundaryTop = -CGFLOAT_MAX;
++  mEditable.mVerticalBoundaryBottom = CGFLOAT_MAX;
++  mEditable.mVerticalBoundariesComputed = NO;
++}
++
++// Returns the visible editable regions, which is later used to check if
++// handles,  highlights, and carets are offscreen and therefore prevent them
++// from snapping to hidden content.
++- (CGRect)selectionBounds {
++  CGRect bounds = self.bounds;
++  if (CGRectIsEmpty(bounds) || CGRectIsNull(bounds)) {
++    return CGRectZero;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  LayoutDeviceIntRect editorRect;
++  bool hasEditorRect = handler && handler->EditorRect(editorRect);
++  if (hasEditorRect) {
++    bounds = DevPixelsToUIKitPoints(editorRect, [self contentScaleFactor]);
++    if (!ClipCGRectToBounds(bounds, self.bounds)) {
++      return CGRectZero;
++    }
++  }
++
++  return bounds;
++}
++
++- (BOOL)clipToSelectionBounds:(CGRect*)aRect {
++  if (!aRect) {
++    return NO;
++  }
++
++  // Intersect the caller's rect with the currently visible editable viewport.
++  // If the editor is fully clipped away, clear the rect so downstream callers
++  // can treat the geometry as unavailable instead of partially offscreen.
++  CGRect bounds = [self selectionBounds];
++  if (CGRectIsEmpty(bounds) || CGRectIsNull(bounds)) {
++    *aRect = CGRectZero;
++    return NO;
++  }
++
++  return ClipCGRectToBounds(*aRect, bounds);
++}
++
++// Checks if a rect is fully visible within the selection bounds.
++// This is used for checking whether we should show caret / selection handles or
++// not.
++- (BOOL)isRectFullyVisibleInSelectionBounds:(CGRect)aRect {
++  if (CGRectIsEmpty(aRect) || CGRectIsNull(aRect)) {
++    return NO;
++  }
++
++  CGRect bounds = [self selectionBounds];
++  if (CGRectIsEmpty(bounds) || CGRectIsNull(bounds)) {
++    return NO;
++  }
++
++  return CGRectContainsRect(CGRectStandardize(bounds),
++                            CGRectStandardize(aRect));
++}
++
++// When Gecko's live selection lags behind UIKit's shadow selection
++// during fast handle drags, reuse the predicted active-handle rect so UIKit
++// keeps a stable endpoint instead of temporarily dropping that handle.
++- (BOOL)cachedHandleRect:(CGRect*)aRect
++               forOffset:(NSUInteger)aOffset
++                  handle:(GeckoSelectionHandle)aHandle {
++  if (!aRect || aHandle == GeckoSelectionHandleNone ||
++      mEditable.mActiveSelectionHandle != aHandle ||
++      mEditable.mShadowActiveHandleOffset == NSNotFound ||
++      mEditable.mShadowActiveHandleOffset != aOffset ||
++      CGRectIsEmpty(mEditable.mShadowActiveHandleRect)) {
++    return NO;
++  }
++
++  *aRect = mEditable.mShadowActiveHandleRect;
++  if (![self isRectFullyVisibleInSelectionBounds:*aRect]) {
++    *aRect = CGRectZero;
++    return NO;
++  }
++  return YES;
++}
++
++// Returns the caret rect for a given character offset.
++- (BOOL)caretRect:(CGRect*)aRect
++         atOffset:(NSUInteger)aOffset
++          handler:(widget::TextInputHandler*)aHandler {
++  if (!aRect || !aHandler) {
++    return NO;
++  }
++
++  NSRange geckoRange = [self geckoRangeForVisibleRange:NSMakeRange(aOffset, 0)];
++  if (geckoRange.location == NSNotFound || geckoRange.location > UINT32_MAX) {
++    *aRect = CGRectZero;
++    return NO;
++  }
++
++  LayoutDeviceIntRect caretRect;
++  if (!aHandler->CaretRectForOffset(static_cast<uint32_t>(geckoRange.location),
++                                    caretRect)) {
++    *aRect = CGRectZero;
++    return NO;
++  }
++
++  *aRect = DevPixelsToUIKitPoints(caretRect, [self contentScaleFactor]);
++  aRect->size.width = 2.0;
++  return YES;
++}
++
++// Returns the rect for a selection endpoint.
++- (BOOL)handleRect:(CGRect*)aRect
++          atOffset:(NSUInteger)aOffset
++            handle:(GeckoSelectionHandle)aHandle
++           handler:(widget::TextInputHandler*)aHandler {
++  if (!aRect) {
++    return NO;
++  }
++
++  CGRect caretRect = CGRectZero;
++  if (![self caretRect:&caretRect atOffset:aOffset handler:aHandler]) {
++    if ([self cachedHandleRect:aRect forOffset:aOffset handle:aHandle]) {
++      return YES;
++    }
++    return NO;
++  }
++
++  *aRect = caretRect;
++  return YES;
++}
++
++// Returns a visible endpoint rect clipped to the editable bounds.
++- (BOOL)visibleHandleRect:(CGRect*)aRect
++                 atOffset:(NSUInteger)aOffset
++                   handle:(GeckoSelectionHandle)aHandle
++                  handler:(widget::TextInputHandler*)aHandler {
++  if (![self handleRect:aRect
++               atOffset:aOffset
++                 handle:aHandle
++                handler:aHandler]) {
++    return NO;
++  }
++
++  if (![self isRectFullyVisibleInSelectionBounds:*aRect]) {
++    *aRect = CGRectZero;
++    return NO;
++  }
++
++  return YES;
++}
++
++// Returns the visible rects for the selection endpoints of a given range, and
++// whether each endpoint is visible at all. This is used for hit-testing which
++// endpoint the user is trying to drag, and also for deciding when to hide the
++// handles because they're offscreen.
++- (EndpointRects)visibleHandleRectsForRange:(NSRange)aRange
++                                    handler:
++                                        (widget::TextInputHandler*)aHandler {
++  EndpointRects rects = {};
++  if (!aHandler || aRange.location == NSNotFound) {
++    return rects;
++  }
++
++  const NSUInteger startOffset = [self clampOffset:aRange.location];
++  const NSUInteger endOffset =
++      [self clampOffset:aRange.location + aRange.length];
++  const GeckoSelectionHandle startHandle =
++      aRange.length > 0 ? GeckoSelectionHandleStart : GeckoSelectionHandleNone;
++  const GeckoSelectionHandle endHandle =
++      aRange.length > 0 ? GeckoSelectionHandleEnd : GeckoSelectionHandleNone;
++
++  rects.hasStart = [self visibleHandleRect:&rects.startRect
++                                  atOffset:startOffset
++                                    handle:startHandle
++                                   handler:aHandler];
++  rects.hasEnd = [self visibleHandleRect:&rects.endRect
++                                atOffset:endOffset
++                                  handle:endHandle
++                                 handler:aHandler];
++  return rects;
++}
++
++// Estimates the horizontal step size that should move the dragged endpoint by
++// one character. It samples neighboring caret rects on the same visual line,
++// then falls back to a fixed width when Gecko cannot provide usable geometry.
++- (CGFloat)charWidthAtOffset:(NSUInteger)aOffset
++                   caretRect:(CGRect)aCaretRect
++                     handler:(widget::TextInputHandler*)aHandler {
++  if (!aHandler) {
++    return kFallbackCharWidth;
++  }
++
++  CGFloat characterWidth = 0;
++  CGRect neighborRect = CGRectZero;
++  const NSUInteger textLength = [self documentLength];
++  if (aOffset < textLength &&
++      [self caretRect:&neighborRect atOffset:aOffset + 1 handler:aHandler] &&
++      RectsShareVisualLine(aCaretRect, neighborRect)) {
++    characterWidth =
++        fabs(CGRectGetMinX(neighborRect) - CGRectGetMinX(aCaretRect));
++  }
++  if (characterWidth < 0.5 && aOffset > 0 &&
++      [self caretRect:&neighborRect atOffset:aOffset - 1 handler:aHandler] &&
++      RectsShareVisualLine(aCaretRect, neighborRect)) {
++    characterWidth =
++        fabs(CGRectGetMinX(aCaretRect) - CGRectGetMinX(neighborRect));
++  }
++
++  return characterWidth >= 0.5 ? characterWidth : kFallbackCharWidth;
++}
++
++// Determines which visible selection endpoint the touch is trying to grab.
++// Offscreen handles are ignored, and taps outside the handle hit radius will
++// not start a drag.
++- (GeckoSelectionHandle)closestHandleToPoint:(CGPoint)aPoint
++                                       range:(NSRange)aRange
++                                     handler:
++                                         (widget::TextInputHandler*)aHandler {
++  if (!aHandler || aRange.location == NSNotFound || aRange.length == 0) {
++    return GeckoSelectionHandleNone;
++  }
++
++  const EndpointRects rects = [self visibleHandleRectsForRange:aRange
++                                                       handler:aHandler];
++  if (!rects.hasStart && !rects.hasEnd) {
++    return GeckoSelectionHandleNone;
++  }
++
++  CGFloat lowerDistance =
++      rects.hasStart ? DistanceToSelectionHandle(aPoint, rects.startRect)
++                     : CGFLOAT_MAX;
++  CGFloat upperDistance = rects.hasEnd
++                              ? DistanceToSelectionHandle(aPoint, rects.endRect)
++                              : CGFLOAT_MAX;
++  if (std::min(lowerDistance, upperDistance) > kHandleHitRadius) {
++    return GeckoSelectionHandleNone;
++  }
++
++  return lowerDistance <= upperDistance ? GeckoSelectionHandleStart
++                                        : GeckoSelectionHandleEnd;
++}
++
++// Starts tracking the selection handle nearest to the touch point and make the
++// opposite handle stable. During dragging, only the active handle update its
++// position while the other stays fixed.
++- (void)startHandleTrackingAtPoint:(CGPoint)aPoint
++                             range:(NSRange)aRange
++                           handler:(widget::TextInputHandler*)aHandler {
++  [NSObject cancelPreviousPerformRequestsWithTarget:self
++                                           selector:@selector(resetHandleState)
++                                             object:nil];
++  [self resetHandleState];
++
++  GeckoSelectionHandle handle = [self closestHandleToPoint:aPoint
++                                                     range:aRange
++                                                   handler:aHandler];
++  if (handle == GeckoSelectionHandleNone) {
++    return;
++  }
++
++  NSUInteger lower = [self clampOffset:aRange.location];
++  NSUInteger upper = [self clampOffset:aRange.location + aRange.length];
++
++  mEditable.mActiveSelectionHandle = handle;
++  mEditable.mSelectionHandleAnchorOffset =
++      handle == GeckoSelectionHandleStart ? upper : lower;
++
++  NSUInteger handleOffset = handle == GeckoSelectionHandleStart ? lower : upper;
++
++  // Seed the shadow so closestPositionToPoint always has a valid base.
++  CGRect initialRect;
++  if ([self caretRect:&initialRect atOffset:handleOffset handler:aHandler]) {
++    mEditable.mShadowActiveHandleOffset = handleOffset;
++    mEditable.mShadowActiveHandleRect = initialRect;
++  }
++
++  [self computeLineBoundariesForOffset:handleOffset handler:aHandler];
++  [self computeVerticalBoundariesForOffset:handleOffset handler:aHandler];
++}
++
++// This is my own implementation for finding the visual line boundaries so that
++// dragging selection handles horizontally can be constrained within the current
++// line (just like the iOS native behavior).
++// I initially asked an LLM for how to best do this, but it just implement some
++// slop calculations, boundary checks, and bouncing back handles on every
++// interaction in closestPositionToPoint, which is just extremely slow and
++// unreliable.
++// So I came up with this instead. What's even better is that this is triggered
++// only once right after a word is selected, so it's fast. Still not a great
++// solution tbh, but it clearly works beautifully and reliably.
++- (void)computeLineBoundariesForOffset:(NSUInteger)aOffset
++                               handler:(widget::TextInputHandler*)aHandler {
++  mEditable.mLineBoundariesComputed = NO;
++  mEditable.mLineBoundaryStart = 0;
++  mEditable.mLineBoundaryEnd = [self documentLength];
++
++  if (!aHandler) {
++    return;
++  }
++
++  CGRect refRect;
++  if (![self caretRect:&refRect atOffset:aOffset handler:aHandler]) {
++    return;
++  }
++
++  const NSUInteger textLength = [self documentLength];
++
++  // Walk right until the caret moves to a different visual line.
++  NSUInteger rightBoundary = aOffset;
++  for (NSUInteger i = aOffset + 1; i <= textLength; i++) {
++    CGRect testRect;
++    if (![self caretRect:&testRect atOffset:i handler:aHandler]) {
++      break;
++    }
++    if (!RectsShareVisualLine(refRect, testRect)) {
++      break;
++    }
++    rightBoundary = i;
++  }
++
++  // Walk left until the caret moves to a different visual line.
++  NSUInteger leftBoundary = aOffset;
++  if (aOffset > 0) {
++    for (NSInteger i = (NSInteger)aOffset - 1; i >= 0; i--) {
++      CGRect testRect;
++      if (![self caretRect:&testRect atOffset:(NSUInteger)i handler:aHandler]) {
++        break;
++      }
++      if (!RectsShareVisualLine(refRect, testRect)) {
++        break;
++      }
++      leftBoundary = (NSUInteger)i;
++    }
++  }
++
++  mEditable.mLineBoundaryStart = leftBoundary;
++  mEditable.mLineBoundaryEnd = rightBoundary;
++  mEditable.mLineBoundariesComputed = YES;
++}
++
++// findClosestOffsetToX and computeVerticalBoundariesForOffset, are functions
++// which work together to implement the vertical dragging support.
++//
++// I thought of a simple implementation like this:
++// - When a handle is being dragged, continuously monitor the y position of the
++// finger's touch.
++// - Introduce a "vertical boundary". Says y1 is the y of the current line and
++// y2 is the y of the adjacent line. The vertical boundary will have a y of (y1
++// + y2) / 2. So the current line will have 2 vertical boundaries, one on top
++// and one on the bottom.
++// - Compare the y of the finger against these boundaries. So we keep horizontal
++// dragging activated if the finger's y is in between these boundaries;
++// otherwise, activate vertical dragging.
++// - For vertical dragging, immediately check if a character rect on the line
++// underneath the finger has the closest x to the finger's x, and move the
++// handle there immediately. If the line is too short (the right boundary is
++// smaller than the finger's x), just move the handle to the end of the line.
++//
++// This implementation takes advantage of the neighboring selection cache added
++// for line boundary checks. Got an LLM to help me write code based on this
++// and it just works so well with barely any adjustments.
++
++// Computes vertical boundaries for the current visual line. Each boundary
++// is the midpoint between the current line center and an adjacent line center.
++- (void)computeVerticalBoundariesForOffset:(NSUInteger)aOffset
++                                   handler:(widget::TextInputHandler*)aHandler {
++  mEditable.mVerticalBoundariesComputed = NO;
++  mEditable.mVerticalBoundaryTop = -CGFLOAT_MAX;
++  mEditable.mVerticalBoundaryBottom = CGFLOAT_MAX;
++
++  if (!aHandler || !mEditable.mLineBoundariesComputed) {
++    return;
++  }
++
++  CGRect refRect;
++  if (![self caretRect:&refRect atOffset:aOffset handler:aHandler]) {
++    return;
++  }
++
++  CGFloat currentMidY = CGRectGetMidY(refRect);
++
++  // Find the adjacent line above by looking one offset before the line start.
++  if (mEditable.mLineBoundaryStart > 0) {
++    CGRect aboveRect;
++    if ([self caretRect:&aboveRect
++               atOffset:mEditable.mLineBoundaryStart - 1
++                handler:aHandler]) {
++      CGFloat aboveMidY = CGRectGetMidY(aboveRect);
++      mEditable.mVerticalBoundaryTop = (currentMidY + aboveMidY) / 2.0;
++    }
++  }
++
++  // Find the adjacent line below by looking one offset past the line end.
++  const NSUInteger textLength = [self documentLength];
++  if (mEditable.mLineBoundaryEnd < textLength) {
++    CGRect belowRect;
++    if ([self caretRect:&belowRect
++               atOffset:mEditable.mLineBoundaryEnd + 1
++                handler:aHandler]) {
++      CGFloat belowMidY = CGRectGetMidY(belowRect);
++      mEditable.mVerticalBoundaryBottom = (currentMidY + belowMidY) / 2.0;
++    }
++  }
++
++  mEditable.mVerticalBoundariesComputed = YES;
++}
++
++// Scans offsets within a visual line and returns the one whose caret rect
++// is horizontally closest to aTargetX. Used after a vertical line jump.
++- (NSUInteger)findClosestOffsetToX:(CGFloat)aTargetX
++                       onLineStart:(NSUInteger)aLineStart
++                           lineEnd:(NSUInteger)aLineEnd
++                           handler:(widget::TextInputHandler*)aHandler {
++  NSUInteger bestOffset = aLineStart;
++  CGFloat bestDistance = CGFLOAT_MAX;
++
++  for (NSUInteger i = aLineStart; i <= aLineEnd; i++) {
++    CGRect rect;
++    if (![self caretRect:&rect atOffset:i handler:aHandler]) {
++      continue;
++    }
++    CGFloat dist = fabs(aTargetX - CGRectGetMinX(rect));
++    if (dist < bestDistance) {
++      bestDistance = dist;
++      bestOffset = i;
++    }
++  }
++
++  return bestOffset;
++}
++
++// Returns the Gecko document range that a normal deleteBackward should remove.
++- (NSRange)deleteBackwardRangeWithHandler:(widget::TextInputHandler*)aHandler {
++  NSRange selection = NSMakeRange(NSNotFound, 0);
++  if (!aHandler || !aHandler->SelectedRange(selection) ||
++      selection.location == NSNotFound) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  NSRange textRange = selection.length ? NSMakeRange(0, UINT32_MAX)
++                                       : NSMakeRange(0, selection.location);
++  nsString text;
++  if (!aHandler->TextInRange(textRange, text)) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  NSString* string = [NSString
++      stringWithCharacters:reinterpret_cast<const unichar*>(text.BeginReading())
++                    length:text.Length()];
++  return [self deleteBackwardRangeInText:string selection:selection];
++}
++
++// Returns the current selected text range.
++- (UITextRange*)selectedTextRange {
++  if (mEditable.mActiveSelectionHandle != GeckoSelectionHandleNone &&
++      mEditable.mShadowSelectedRange.location != NSNotFound) {
++    return [self textRangeForRange:mEditable.mShadowSelectedRange];
++  }
++  if ([self hasVietnameseBuffer] &&
++      mEditable.mVietnameseBufferSelection.location != NSNotFound) {
++    return [self textRangeForExactRange:mEditable.mVietnameseBufferSelection];
++  }
++  NSRange range = [self selectedRange];
++  if (range.location == NSNotFound) {
++    return nil;
++  }
++  return [self textRangeForRange:range];
++}
++
++// Updates Gecko selection to match UIKit's selected text range.
++- (void)setSelectedTextRange:(UITextRange*)aSelectedTextRange {
++  NSRange range = [self rangeForTextRange:aSelectedTextRange];
++  if (range.location == NSNotFound) {
++    return;
++  }
++
++  if ([self hasVietnameseBuffer]) {
++    // Keep selection changes inside the buffer. Gecko will be updated when the
++    // keyboard commits an edit command against this selection.
++    NSUInteger bufferLength = [mEditable.mVietnameseBufferText length];
++    NSUInteger location = std::min(range.location, bufferLength);
++    NSUInteger length = std::min(range.length, bufferLength - location);
++    mEditable.mVietnameseBufferSelection = NSMakeRange(location, length);
++    if (length) {
++      mEditable.mVietnameseBufferMarkedRange =
++          mEditable.mVietnameseBufferSelection;
++    } else if (mEditable.mVietnameseBufferMarkedRange.location != NSNotFound &&
++               (location < mEditable.mVietnameseBufferMarkedRange.location ||
++                location >
++                    NSMaxRange(mEditable.mVietnameseBufferMarkedRange))) {
++      // If we move the caret outside the current marked range, that means we no
++      // longer do composing a word.
++      [self clearVietnameseMarkedRange];
++    }
++    return;
++  }
++
++  mEditable.mShadowSelectedRange = range;
++
++  if (range.length == 0 &&
++      mEditable.mActiveSelectionHandle == GeckoSelectionHandleNone) {
++    [self resetHandleState];
++  }
++
++  if (mEditable.mCaretMenuActive) {
++    mEditable.mCaretMenuActive = NO;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return;
++  }
++
++  [mEditable.mTextInputDelegate selectionWillChange:self];
++  handler->SetSelectedRange(range);
++  [mEditable.mTextInputDelegate selectionDidChange:self];
++  if (mEditable.mSelectionDisplayInteraction == nil &&
++      mEditable.mActiveSelectionHandle != GeckoSelectionHandleNone) {
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:@selector(resetHandleState)
++                                         object:nil];
++    [self performSelector:@selector(resetHandleState)
++               withObject:nil
++               afterDelay:0.25
++                  inModes:@[ NSRunLoopCommonModes ]];
++  }
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self updateEditMenu];
++  }
++}
++
++// Returns the anchor rect UIKit should use for the menus.
++- (CGRect)firstRectForRange:(UITextRange*)aRange {
++  NSRange queryRange = [self rangeForTextRange:aRange];
++  if (queryRange.location == NSNotFound) {
++    return CGRectZero;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return CGRectZero;
++  }
++
++  const EndpointRects rects = [self visibleHandleRectsForRange:queryRange
++                                                       handler:handler];
++
++  // Return only the first line if the selection spans multiple lines
++  if (queryRange.length > 0 && rects.hasStart && rects.hasEnd &&
++      !RectsShareVisualLine(rects.startRect, rects.endRect)) {
++    return rects.startRect;
++  }
++
++  LayoutDeviceIntRect rect;
++  // Menu anchors are Gecko rects; visible ranges from the Vietnamese buffer
++  // need Gecko-offset translation before asking for geometry.
++  NSRange geckoQueryRange = [self geckoRangeForVisibleRange:queryRange];
++  if (handler->TextRectForRange(geckoQueryRange, rect)) {
++    CGRect uiRect = DevPixelsToUIKitPoints(rect, [self contentScaleFactor]);
++    if ([self clipToSelectionBounds:&uiRect]) {
++      return uiRect;
++    }
++  }
++
++  return CGRectZero;
++}
++
++// Returns the caret rect for a text position.
++- (CGRect)caretRectForPosition:(UITextPosition*)aPosition {
++  ChildViewTextPosition* textPosition = [self textPosForPosition:aPosition];
++  if (!textPosition) {
++    return CGRectZero;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return CGRectZero;
++  }
++
++  NSRange selectedRange = [self hasVietnameseBuffer]
++                              ? mEditable.mVietnameseBufferSelection
++                              : [self selectedRange];
++  CGRect uiRect = CGRectZero;
++  GeckoSelectionHandle handle = GeckoSelectionHandleNone;
++  if (selectedRange.location != NSNotFound && selectedRange.length > 0) {
++    if (textPosition.offset == [self clampOffset:selectedRange.location]) {
++      handle = GeckoSelectionHandleStart;
++    } else if (textPosition.offset == [self clampOffset:selectedRange.location +
++                                                        selectedRange.length]) {
++      handle = GeckoSelectionHandleEnd;
++    }
++  }
++  if (![self handleRect:&uiRect
++               atOffset:textPosition.offset
++                 handle:handle
++                handler:handler]) {
++    return CGRectZero;
++  }
++
++  if (![self isRectFullyVisibleInSelectionBounds:uiRect]) {
++    return CGRectZero;
++  }
++  return uiRect;
++}
++
++// Multi-line selection highlight:
++// For each multi-line selection, we create 3 rects:
++//   1. Start line: from the start caret to the RIGHT editable boundary.
++//   2. Middle area: full width of the editable region between lines.
++//   3. End line: from the LEFT editable boundary to the end caret.
++// The -10000/10000 trick pushes offscreen handle endpoints far off the
++// display so they can be hidden automatically during scrolling/dragging.
++- (void)appendModernMultiLineRectsForStart:(CGRect)aStartRect
++                                       end:(CGRect)aEndRect
++                                    bounds:(CGRect)aBounds
++                             containsStart:(BOOL)aContainsStart
++                               containsEnd:(BOOL)aContainsEnd
++                                      into:(NSMutableArray*)aOut {
++  // Start-line highlight: from start caret to right editable boundary.
++  CGRect startHighlight =
++      CGRectMake(CGRectGetMinX(aStartRect), CGRectGetMinY(aStartRect),
++                 CGRectGetMaxX(aBounds) - CGRectGetMinX(aStartRect),
++                 CGRectGetHeight(aStartRect));
++  CGRect clippedStart = startHighlight;
++  if (!ClipCGRectToBounds(clippedStart, aBounds)) {
++    CGFloat offY =
++        CGRectGetMidY(aStartRect) < CGRectGetMidY(aBounds) ? -10000 : 10000;
++    clippedStart =
++        CGRectMake(CGRectGetMinX(aStartRect), offY, CGRectGetWidth(aStartRect),
++                   CGRectGetHeight(aStartRect));
++  }
++  AppendSelectionRect(aOut, clippedStart, aContainsStart, NO);
++
++  // Middle area: fill the gap between the start and end lines with a
++  // full-width rect spanning the editable bounds.
++  CGFloat middleTop = CGRectGetMaxY(aStartRect);
++  CGFloat middleBottom = CGRectGetMinY(aEndRect);
++  if (middleBottom > middleTop) {
++    CGRect middleRect =
++        CGRectMake(CGRectGetMinX(aBounds), middleTop, CGRectGetWidth(aBounds),
++                   middleBottom - middleTop);
++    CGRect clippedMiddle = middleRect;
++    if (ClipCGRectToBounds(clippedMiddle, aBounds)) {
++      AppendSelectionRect(aOut, clippedMiddle, NO, NO);
++    }
++  }
++
++  // End-line highlight: from left editable boundary to end caret.
++  CGRect endHighlight =
++      CGRectMake(CGRectGetMinX(aBounds), CGRectGetMinY(aEndRect),
++                 CGRectGetMaxX(aEndRect) - CGRectGetMinX(aBounds),
++                 CGRectGetHeight(aEndRect));
++  CGRect clippedEnd = endHighlight;
++  if (!ClipCGRectToBounds(clippedEnd, aBounds)) {
++    CGFloat offY =
++        CGRectGetMidY(aEndRect) < CGRectGetMidY(aBounds) ? -10000 : 10000;
++    clippedEnd =
++        CGRectMake(CGRectGetMinX(aEndRect), offY, CGRectGetWidth(aEndRect),
++                   CGRectGetHeight(aEndRect));
++  }
++  AppendSelectionRect(aOut, clippedEnd, NO, aContainsEnd);
++}
++
++- (void)appendLegacyMultiLineRectsForStart:(CGRect)aStartRect
++                                       end:(CGRect)aEndRect
++                                    bounds:(CGRect)aBounds
++                             containsStart:(BOOL)aContainsStart
++                               containsEnd:(BOOL)aContainsEnd
++                                      into:(NSMutableArray*)aOut {
++  const BOOL isDragging =
++      mEditable.mActiveSelectionHandle != GeckoSelectionHandleNone;
++
++  // Start-line highlight: from start caret to right editable boundary.
++  CGRect startHighlight =
++      CGRectMake(CGRectGetMinX(aStartRect), CGRectGetMinY(aStartRect),
++                 CGRectGetMaxX(aBounds) - CGRectGetMinX(aStartRect),
++                 CGRectGetHeight(aStartRect));
++  CGRect clippedStart = startHighlight;
++  if (!ClipCGRectToBounds(clippedStart, aBounds)) {
++    if (isDragging) {
++      CGFloat offY =
++          CGRectGetMidY(aStartRect) < CGRectGetMidY(aBounds) ? -10000 : 10000;
++      clippedStart =
++          CGRectMake(CGRectGetMinX(aStartRect), offY,
++                     CGRectGetWidth(aStartRect), CGRectGetHeight(aStartRect));
++    } else {
++      CGFloat clampedY =
++          fmax(CGRectGetMinY(aBounds),
++               fmin(CGRectGetMinY(aStartRect),
++                    CGRectGetMaxY(aBounds) - CGRectGetHeight(aStartRect)));
++      clippedStart =
++          CGRectMake(CGRectGetMinX(aStartRect), clampedY,
++                     CGRectGetMaxX(aBounds) - CGRectGetMinX(aStartRect),
++                     CGRectGetHeight(aStartRect));
++    }
++  }
++  AppendSelectionRect(aOut, clippedStart, aContainsStart, NO);
++
++  // Middle area: fill the gap between the start and end lines with a
++  // full-width rect spanning the editable bounds.
++  CGFloat middleTop = CGRectGetMaxY(aStartRect);
++  CGFloat middleBottom = CGRectGetMinY(aEndRect);
++  if (middleBottom > middleTop) {
++    CGRect middleRect =
++        CGRectMake(CGRectGetMinX(aBounds), middleTop, CGRectGetWidth(aBounds),
++                   middleBottom - middleTop);
++    CGRect clippedMiddle = middleRect;
++    if (ClipCGRectToBounds(clippedMiddle, aBounds)) {
++      AppendSelectionRect(aOut, clippedMiddle, NO, NO);
++    }
++  }
++
++  // End-line highlight: from left editable boundary to end caret.
++  CGRect endHighlight =
++      CGRectMake(CGRectGetMinX(aBounds), CGRectGetMinY(aEndRect),
++                 CGRectGetMaxX(aEndRect) - CGRectGetMinX(aBounds),
++                 CGRectGetHeight(aEndRect));
++  CGRect clippedEnd = endHighlight;
++  if (!ClipCGRectToBounds(clippedEnd, aBounds)) {
++    if (isDragging) {
++      CGFloat offY =
++          CGRectGetMidY(aEndRect) < CGRectGetMidY(aBounds) ? -10000 : 10000;
++      clippedEnd =
++          CGRectMake(CGRectGetMinX(aEndRect), offY, CGRectGetWidth(aEndRect),
++                     CGRectGetHeight(aEndRect));
++    } else {
++      CGFloat clampedY =
++          fmax(CGRectGetMinY(aBounds),
++               fmin(CGRectGetMinY(aEndRect),
++                    CGRectGetMaxY(aBounds) - CGRectGetHeight(aEndRect)));
++      clippedEnd = CGRectMake(CGRectGetMinX(aBounds), clampedY,
++                              CGRectGetMaxX(aEndRect) - CGRectGetMinX(aBounds),
++                              CGRectGetHeight(aEndRect));
++    }
++  }
++  AppendSelectionRect(aOut, clippedEnd, NO, aContainsEnd);
++}
++
++// Create UITextSelectionRect objects from Gecko's selection geometry, clipped
++// to the visible editor region.
++- (NSArray*)selectionRectsForRange:(UITextRange*)aRange {
++  NSRange queryRange = [self rangeForTextRange:aRange];
++  if (queryRange.location == NSNotFound) {
++    return [NSArray array];
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return [NSArray array];
++  }
++
++  CGRect visibleBounds = [self selectionBounds];
++  if (CGRectIsEmpty(visibleBounds) || CGRectIsNull(visibleBounds)) {
++    return [NSArray array];
++  }
++
++  NSMutableArray* selectionRects = [NSMutableArray array];
++
++  const NSUInteger startOffset = [self clampOffset:queryRange.location];
++  const NSUInteger endOffset =
++      [self clampOffset:queryRange.location + queryRange.length];
++  const GeckoSelectionHandle startHandle = queryRange.length > 0
++                                               ? GeckoSelectionHandleStart
++                                               : GeckoSelectionHandleNone;
++  const GeckoSelectionHandle endHandle = queryRange.length > 0
++                                             ? GeckoSelectionHandleEnd
++                                             : GeckoSelectionHandleNone;
++
++  // First try to describe the selection from its endpoints. That gives UIKit
++  // better information about which fragment contains the true start/end of the
++  // selection, which matters for handle placement and grabber visibility.
++  CGRect startRect = CGRectZero;
++  CGRect endRect = CGRectZero;
++  bool hasStartRect = [self handleRect:&startRect
++                              atOffset:startOffset
++                                handle:startHandle
++                               handler:handler];
++  bool hasEndRect = [self handleRect:&endRect
++                            atOffset:endOffset
++                              handle:endHandle
++                             handler:handler];
++
++  if (hasStartRect && hasEndRect) {
++    // ContentCacheInParent's mFirstCharRect is stale during handle drags:
++    // the cached rect for offset 0 can have wrong X and/or
++    // wrong Y/height. So we always normalize offset 0 against
++    // offset 1, which comes from the reliable text-rect cache window.
++    if (queryRange.length > 0 && startOffset == 0) {
++      CGRect nextRect;
++      if ([self handleRect:&nextRect
++                  atOffset:1
++                    handle:startHandle
++                   handler:handler]) {
++        // Always adopt Y and height from offset 1.
++        startRect.origin.y = nextRect.origin.y;
++        startRect.size.height = nextRect.size.height;
++        // If X is also stale (offset 0 to the right of offset 1), pin to
++        // the editor's left edge.
++        if (CGRectGetMinX(startRect) > CGRectGetMinX(nextRect)) {
++          startRect.origin.x = CGRectGetMinX(visibleBounds);
++        }
++      }
++    }
++
++    // Multi-line
++    if (!RectsShareVisualLine(startRect, endRect)) {
++      const BOOL containsStart =
++          [self isRectFullyVisibleInSelectionBounds:startRect];
++      const BOOL containsEnd =
++          [self isRectFullyVisibleInSelectionBounds:endRect];
++
++      if (mEditable.mSelectionDisplayInteraction == nil) {
++        [self appendLegacyMultiLineRectsForStart:startRect
++                                             end:endRect
++                                          bounds:visibleBounds
++                                   containsStart:containsStart
++                                     containsEnd:containsEnd
++                                            into:selectionRects];
++      } else {
++        [self appendModernMultiLineRectsForStart:startRect
++                                             end:endRect
++                                          bounds:visibleBounds
++                                   containsStart:containsStart
++                                     containsEnd:containsEnd
++                                            into:selectionRects];
++      }
++    } else {
++      // For a single-line selection, merge both endpoints into one span rect so
++      // UIKit sees the whole highlight as a single visual segment.
++      CGFloat minX = fmin(CGRectGetMinX(startRect), CGRectGetMinX(endRect));
++      CGFloat maxX = fmax(CGRectGetMaxX(startRect), CGRectGetMaxX(endRect));
++      CGRect spanRect = CGRectMake(minX, CGRectGetMinY(startRect), maxX - minX,
++                                   CGRectGetHeight(startRect));
++      const BOOL containsStart =
++          [self isRectFullyVisibleInSelectionBounds:startRect];
++      const BOOL containsEnd =
++          [self isRectFullyVisibleInSelectionBounds:endRect];
++      if (ClipCGRectToBounds(spanRect, visibleBounds)) {
++        AppendSelectionRect(selectionRects, spanRect, containsStart,
++                            containsEnd);
++      }
++    }
++  }
++
++  if ([selectionRects count] > 0) {
++    return selectionRects;
++  }
++
++  // If endpoint geometry is missing, fall back to Gecko's aggregate text rect.
++  LayoutDeviceIntRect rect;
++  NSRange geckoQueryRange = [self geckoRangeForVisibleRange:queryRange];
++  if (handler->TextRectForRange(geckoQueryRange, rect)) {
++    CGRect uiRect = DevPixelsToUIKitPoints(rect, [self contentScaleFactor]);
++    if (ClipCGRectToBounds(uiRect, visibleBounds)) {
++      AppendSelectionRect(selectionRects, uiRect, NO, NO);
++    }
++  }
++  return selectionRects;
++}
++
++// Converts a touch point into a document position. Pretty simple?
++// But this is the chosen candidate for lots of the work on selection dragging,
++// thanks to it being called on placing carets and selection drags, and as I do
++// research it seems like people usually use it to identify a tapped word on a
++// UITextInput?
++- (UITextPosition*)closestPositionToPoint:(CGPoint)aPoint {
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return [self endOfDocument];
++  }
++
++  NSRange selectedRange = [self selectedRange];
++
++  // If a drag is already active, use the shadow range so prevent the active
++  // handle from jumping around when Gecko's selection update lag behind.
++  if (mEditable.mActiveSelectionHandle != GeckoSelectionHandleNone &&
++      mEditable.mShadowSelectedRange.location != NSNotFound) {
++    selectedRange = mEditable.mShadowSelectedRange;
++  }
++
++  // Find the touched handle to start tracking
++  if (selectedRange.location != NSNotFound && selectedRange.length > 0) {
++    GeckoSelectionHandle touchedHandle =
++        [self closestHandleToPoint:aPoint range:selectedRange handler:handler];
++    // I initially did this "if" condition without
++    // (!(mEditable.mSelectionDisplayInteraction != nil) &&
++    // touchedHandle != mEditable.mActiveSelectionHandle). However, I ran into
++    // the problem where after dragging a handle, then release touch, then try
++    // to drag the opposite handle, the opposite handle just become
++    // unresponsive. So with that, the drag is prevented from staying pinned to
++    // the original active endpoint, and also forced to reselect the active
++    // handle when a different handle is touched.
++    if (touchedHandle != GeckoSelectionHandleNone &&
++        (mEditable.mActiveSelectionHandle == GeckoSelectionHandleNone ||
++         (!(mEditable.mSelectionDisplayInteraction != nil) &&
++          touchedHandle != mEditable.mActiveSelectionHandle))) {
++      [self startHandleTrackingAtPoint:aPoint
++                                 range:selectedRange
++                               handler:handler];
++    }
++  }
++
++  NSUInteger candidateOffset = 0;
++  if (selectedRange.location != NSNotFound &&
++      mEditable.mActiveSelectionHandle != GeckoSelectionHandleNone &&
++      mEditable.mSelectionHandleAnchorOffset != NSNotFound) {
++    const NSUInteger textLength = [self documentLength];
++
++    // Here we use the shadow position as the base for calculations, because
++    // if we use Gecko's committed offsets (which are lagging behind), it may
++    // cause the handle to wiggle during dragging, especially during fast drags.
++    NSUInteger baseOffset = mEditable.mShadowActiveHandleOffset;
++    CGRect baseRect = mEditable.mShadowActiveHandleRect;
++
++    // When the finger's y crosses a vertical boundary (the midpoint
++    // between adjacent line centers), jump the handle to that line and
++    // position it at the character closest to the finger's x.
++    BOOL verticalJump = NO;
++    if (mEditable.mVerticalBoundariesComputed) {
++      BOOL crossedUp = aPoint.y < mEditable.mVerticalBoundaryTop;
++      BOOL crossedDown = aPoint.y > mEditable.mVerticalBoundaryBottom;
++      const NSUInteger anchor = mEditable.mSelectionHandleAnchorOffset;
++
++      NSUInteger iterations = 0;
++      while (crossedUp || crossedDown) {
++        if (++iterations > 50) {
++          break;
++        }
++
++        NSUInteger entryOffset = NSNotFound;
++        if (crossedUp && mEditable.mLineBoundaryStart > 0) {
++          entryOffset = mEditable.mLineBoundaryStart - 1;
++        } else if (crossedDown && mEditable.mLineBoundaryEnd < textLength) {
++          entryOffset = mEditable.mLineBoundaryEnd + 1;
++        }
++        if (entryOffset == NSNotFound) {
++          break;
++        }
++
++        CGRect unused;
++        if (![self caretRect:&unused atOffset:entryOffset handler:handler]) {
++          break;
++        }
++
++        // Save the current boundaries so we can revert if the new line
++        // turns out to be past the anchor (the handle cannot cross it).
++        const NSUInteger savedLineStart = mEditable.mLineBoundaryStart;
++        const NSUInteger savedLineEnd = mEditable.mLineBoundaryEnd;
++        const CGFloat savedVTop = mEditable.mVerticalBoundaryTop;
++        const CGFloat savedVBot = mEditable.mVerticalBoundaryBottom;
++        const BOOL savedVComputed = mEditable.mVerticalBoundariesComputed;
++
++        // Recompute horizontal and vertical boundaries for the new line.
++        [self computeLineBoundariesForOffset:entryOffset handler:handler];
++        [self computeVerticalBoundariesForOffset:entryOffset handler:handler];
++
++        // Check if the new line is entirely past the anchor. The end
++        // handle cannot go above a line that does not contain the anchor,
++        // and the start handle cannot go below such a line.
++        BOOL pastAnchor =
++            (mEditable.mActiveSelectionHandle == GeckoSelectionHandleEnd &&
++             mEditable.mLineBoundaryEnd < anchor) ||
++            (mEditable.mActiveSelectionHandle == GeckoSelectionHandleStart &&
++             mEditable.mLineBoundaryStart > anchor);
++
++        if (pastAnchor) {
++          // Revert to the previous boundaries and stop jumping.
++          mEditable.mLineBoundaryStart = savedLineStart;
++          mEditable.mLineBoundaryEnd = savedLineEnd;
++          mEditable.mLineBoundariesComputed = YES;
++          mEditable.mVerticalBoundaryTop = savedVTop;
++          mEditable.mVerticalBoundaryBottom = savedVBot;
++          mEditable.mVerticalBoundariesComputed = savedVComputed;
++          break;
++        }
++
++        verticalJump = YES;
++
++        // If the finger is still beyond the new line's vertical boundaries,
++        // continue jumping to the next line in the same direction.
++        crossedUp = mEditable.mVerticalBoundariesComputed &&
++                    aPoint.y < mEditable.mVerticalBoundaryTop;
++        crossedDown = mEditable.mVerticalBoundariesComputed &&
++                      aPoint.y > mEditable.mVerticalBoundaryBottom;
++      }
++
++      if (verticalJump) {
++        // Scan the new line to find the offset whose caret rect is
++        // horizontally closest to the finger. If the line is shorter
++        // than the finger's x, this naturally picks the last offset.
++        candidateOffset =
++            [self findClosestOffsetToX:aPoint.x
++                           onLineStart:mEditable.mLineBoundaryStart
++                               lineEnd:mEditable.mLineBoundaryEnd
++                               handler:handler];
++      }
++    }
++
++    if (!verticalJump) {
++      // Horizontal displacement logic for dragging within the same line.
++      const CGFloat charWidth = [self charWidthAtOffset:baseOffset
++                                              caretRect:baseRect
++                                                handler:handler];
++
++      // Keep the drag point inside the visible editor so the predicted endpoint
++      // does not jump randomly when the finger moves outside the editable.
++      CGFloat clampedPointX = aPoint.x;
++      CGRect editorBounds = [self selectionBounds];
++      if (!CGRectIsEmpty(editorBounds)) {
++        CGFloat margin = charWidth * 0.5;
++        clampedPointX =
++            fmax(CGRectGetMinX(editorBounds) - charWidth,
++                 fmin(CGRectGetMaxX(editorBounds) - margin, clampedPointX));
++      }
++
++      CGFloat displacement = clampedPointX - CGRectGetMinX(baseRect);
++      NSInteger step = (NSInteger)round(displacement / charWidth);
++      NSInteger newOffset = (NSInteger)baseOffset + step;
++      if (newOffset < 0) newOffset = 0;
++      if ((NSUInteger)newOffset > textLength) newOffset = textLength;
++      candidateOffset = (NSUInteger)newOffset;
++    }
++
++    // Clamp to line boundaries to prevent handle from jumping to adjacent
++    // lines during horizontal dragging.
++    if (mEditable.mLineBoundariesComputed) {
++      candidateOffset =
++          std::max(mEditable.mLineBoundaryStart,
++                   std::min(candidateOffset, mEditable.mLineBoundaryEnd));
++    }
++
++    // Cache the caret rect for the candidate offset, and correct stale
++    // mFirstCharRect from ContentCacheInParent at the line start.
++    CGRect shadowHandleRect;
++    if (![self caretRect:&shadowHandleRect
++                atOffset:candidateOffset
++                 handler:handler]) {
++      shadowHandleRect = baseRect;
++    }
++
++    if (candidateOffset == mEditable.mLineBoundaryStart &&
++        mEditable.mLineBoundariesComputed) {
++      CGRect eb = [self selectionBounds];
++      if (!CGRectIsEmpty(eb)) {
++        CGRect nextRect;
++        NSUInteger nextOff = candidateOffset + 1;
++        if (nextOff <= mEditable.mLineBoundaryEnd &&
++            [self caretRect:&nextRect atOffset:nextOff handler:handler] &&
++            CGRectGetMinX(shadowHandleRect) > CGRectGetMinX(nextRect)) {
++          // The first-char rect from the cache is to the right of the second
++          // character which is just clearly wrong. We use the editor's left
++          // edge instead.
++          shadowHandleRect.origin.x = CGRectGetMinX(eb);
++        }
++      }
++    }
++
++    NSUInteger anchor = mEditable.mSelectionHandleAnchorOffset;
++    candidateOffset = ClampTrackedSelectionOffset(
++        mEditable.mActiveSelectionHandle, candidateOffset, anchor);
++
++    // Enforce a minimum 1-character selection during handle drags so the
++    // ContentCache neighbourhood stays populated.
++    if (candidateOffset == anchor && mEditable.mLineBoundariesComputed) {
++      if (mEditable.mActiveSelectionHandle == GeckoSelectionHandleStart &&
++          anchor > mEditable.mLineBoundaryStart) {
++        candidateOffset = anchor - 1;
++      } else if (mEditable.mActiveSelectionHandle == GeckoSelectionHandleEnd &&
++                 anchor < mEditable.mLineBoundaryEnd) {
++        candidateOffset = anchor + 1;
++      }
++    }
++
++    // Publish the predicted endpoint and the derived shadow selection for the
++    // rest of UITextInput until Gecko commits the same movement.
++    mEditable.mShadowActiveHandleOffset = candidateOffset;
++    mEditable.mShadowActiveHandleRect = shadowHandleRect;
++
++    NSUInteger lower = std::min(candidateOffset, anchor);
++    NSUInteger upper = std::max(candidateOffset, anchor);
++    mEditable.mShadowSelectedRange = NSMakeRange(lower, upper - lower);
++  }
++
++  return [ChildViewTextPosition positionWithOffset:candidateOffset];
++}
++
++// Toggle between editable and non-editable UITextInteraction
++// based on the current input context so native selection handles appear.
++- (void)updateTextInteractions {
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self updateModernTextInteractions];
++    return;
++  }
++  [self updateLegacyTextInteractions];
++}
++
++// Delay resigning first responder for one runloop turn so transient
++// focus handoffs inside the same editable or between editables do not dismiss
++// the keyboard, while a real outside tap still collapses it.
++- (void)scheduleResponderBlur {
++  [self cancelResponderBlur];
++  [self performSelector:@selector(applyResponderBlur)
++             withObject:nil
++             afterDelay:0
++                inModes:@[ NSRunLoopCommonModes ]];
++}
++
++// Cancel a queued blur when Gecko restores editable focus before the
++// deferred resign executes.
++- (void)cancelResponderBlur {
++  [NSObject
++      cancelPreviousPerformRequestsWithTarget:self
++                                     selector:@selector(applyResponderBlur)
++                                       object:nil];
++}
++
++// Apply the deferred blur once it is clear Gecko has not moved focus
++// back into an editable element.
++- (void)applyResponderBlur {
++  if (!mGeckoChild || mGeckoChild->Destroyed() || ![self isFirstResponder]) {
++    return;
++  }
++
++  [self resignFirstResponder];
++  [self updateEditMenu];
++}
++
++// Coalesce selection-geometry notifications so UIKit redraws
++// selection UI at most once per runloop turn.
++- (void)selectionGeometryChanged {
++  // If a caret-menu resolution is pending (from handleTap), check
++  // whether this position-change notification reflects an actual caret
++  // move. If the offset differs from the pre-tap offset, cancel the
++  // pending menu. If it matches, the caret stayed in place and the
++  // fallback timer will show the menu.
++  if (mEditable.mPendingCaretMenu) {
++    NSRange sel = [self selectedRange];
++    if (sel.location == NSNotFound || sel.length > 0 ||
++        labs((long)sel.location - (long)mEditable.mPreTapCaretOffset) > 1) {
++      mEditable.mPendingCaretMenu = NO;
++      [NSObject
++          cancelPreviousPerformRequestsWithTarget:self
++                                         selector:@selector(
++                                                      resolveCaretMenuIfPending)
++                                           object:nil];
++    }
++  }
++
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self refreshSelectionUI];
++  }
++  if (!mEditable.mTextInputDelegate) {
++    return;
++  }
++
++  if (mEditable.mPendingSelectionGeometryRefresh) {
++    return;
++  }
++  mEditable.mPendingSelectionGeometryRefresh = YES;
++  [self performSelector:@selector(applySelectionGeometryChange)
++             withObject:nil
++             afterDelay:0
++                inModes:@[ NSRunLoopCommonModes ]];
++}
++
++// Flushes the deferred selection-geometry notification.
++- (void)applySelectionGeometryChange {
++  mEditable.mPendingSelectionGeometryRefresh = NO;
++
++  if (!mEditable.mTextInputDelegate || !mGeckoChild ||
++      mGeckoChild->Destroyed()) {
++    return;
++  }
++  if (mEditable.mSelectionDisplayInteraction == nil) {
++    [mEditable.mTextInputDelegate selectionWillChange:self];
++  }
++  [mEditable.mTextInputDelegate selectionDidChange:self];
++  if (mEditable.mSelectionDisplayInteraction == nil) {
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:@selector(updateLegacyGrabbers)
++                                         object:nil];
++    [self performSelector:@selector(updateLegacyGrabbers)
++               withObject:nil
++               afterDelay:0
++                  inModes:@[ NSRunLoopCommonModes ]];
++  }
++  [self updateEditMenu];
++}
++
++// Deferred selection-change notification after editing commands.
++- (void)scheduleEditSelectionUpdate {
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self refreshSelectionUI];
++  }
++  if (!mEditable.mTextInputDelegate) {
++    return;
++  }
++
++  [NSObject
++      cancelPreviousPerformRequestsWithTarget:self
++                                     selector:@selector(
++                                                  applyEditSelectionUpdate)
++                                       object:nil];
++  [self performSelector:@selector(applyEditSelectionUpdate)
++             withObject:nil
++             afterDelay:0
++                inModes:@[ NSRunLoopCommonModes ]];
++}
++
++// Flushes the deferred selection-change notification after editing.
++- (void)applyEditSelectionUpdate {
++  if (!mEditable.mTextInputDelegate || !mGeckoChild ||
++      mGeckoChild->Destroyed()) {
++    return;
++  }
++  // If the Vietnamese buffer is still ahead of Gecko, keep the deferred
++  // selection notification alive until the two states match.
++  widget::TextInputHandler* handler =
++      [self hasVietnameseBuffer] ? [self textHandler] : nullptr;
++  if (handler && ![self tryClearSyncedVietnameseBufferWithHandler:handler]) {
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:@selector(
++                                                    applyEditSelectionUpdate)
++                                         object:nil];
++    [self performSelector:@selector(applyEditSelectionUpdate)
++               withObject:nil
++               afterDelay:0.03
++                  inModes:@[ NSRunLoopCommonModes ]];
++  }
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self refreshSelectionUI];
++  }
++  [mEditable.mTextInputDelegate selectionDidChange:self];
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self updateEditMenu];
++  }
++}
++
++// Shows the "Select All | Paste" callout.
++- (void)resolveCaretMenuIfPending {
++  if (!mEditable.mPendingCaretMenu) {
++    return;
++  }
++  mEditable.mPendingCaretMenu = NO;
++  mEditable.mCaretMenuActive = YES;
++  [self updateEditMenu];
++}
++
++// Keeps UIMenuController aligned with the current editable selection state.
++// The menu is shown when:
++//   - there is a non-empty selection (copy/cut/paste), or
++//   - the caret menu flag is active (select-all/paste after re-tap).
++- (void)updateEditMenu {
++  widget::TextInputHandler* handler = [self textHandler];
++  UIMenuController* menuController = [UIMenuController sharedMenuController];
++  if (!handler || ![self isFirstResponder]) {
++    [menuController hideMenuFromView:self];
++    return;
++  }
++
++  NSRange selectedRange = NSMakeRange(NSNotFound, 0);
++  if (!handler->SelectedRange(selectedRange) ||
++      selectedRange.location == NSNotFound) {
++    [menuController hideMenuFromView:self];
++    return;
++  }
++
++  // Non-empty selection: show menu anchored to the selection rect,
++  // but suppress it while a handle drag is in progress.
++  if (selectedRange.length > 0) {
++    mEditable.mCaretMenuActive = NO;
++    if (mEditable.mActiveSelectionHandle != GeckoSelectionHandleNone) {
++      [menuController hideMenuFromView:self];
++      return;
++    }
++    ChildViewTextRange* range = [self textRangeForRange:selectedRange];
++    if (!range) {
++      [menuController hideMenuFromView:self];
++      return;
++    }
++    CGRect targetRect = [self firstRectForRange:range];
++    if (CGRectIsEmpty(targetRect)) {
++      [menuController hideMenuFromView:self];
++      return;
++    }
++    [menuController showMenuFromView:self rect:targetRect];
++    return;
++  }
++
++  // Collapsed caret: show menu only when the caret-menu flag is set.
++  if (mEditable.mCaretMenuActive) {
++    LayoutDeviceIntRect caretDevRect;
++    if (handler->CaretRectForOffset(selectedRange.location, caretDevRect)) {
++      CGRect caretRect =
++          DevPixelsToUIKitPoints(caretDevRect, [self contentScaleFactor]);
++      if (!CGRectIsEmpty(caretRect)) {
++        [menuController showMenuFromView:self rect:caretRect];
++        return;
++      }
++    }
++  }
++
++  [menuController hideMenuFromView:self];
++}
++
++// Returns the plain text inside a UITextRange.
++- (NSString*)textInRange:(UITextRange*)aRange {
++  NSRange queryRange = [self rangeForTextRange:aRange];
++  if (queryRange.location == NSNotFound) {
++    return @"";
++  }
++
++  NSString* bufferText = [self vietnameseBufferTextInRange:queryRange];
++  if (bufferText) {
++    // UITextInput ask for the just-edited Vietnamese text before Gecko has
++    // finished applying it. Return the buffer for that short window.
++    return bufferText;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return @"";
++  }
++
++  nsString text;
++  if (!handler->TextInRange(queryRange, text)) {
++    return @"";
++  }
++
++  return [NSString
++      stringWithCharacters:reinterpret_cast<const unichar*>(text.BeginReading())
++                    length:text.Length()];
++}
++
++// Replaces the text inside a UITextRange.
++- (void)replaceRange:(UITextRange*)aRange withText:(NSString*)aText {
++  NSRange replacementRange = [self rangeForTextRange:aRange];
++  if (replacementRange.location == NSNotFound) {
++    return;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return;
++  }
++
++  if ([self hasVietnameseBuffer]) {
++    handler->ReplaceRange([self geckoRangeForVisibleRange:replacementRange],
++                          aText ?: @"");
++    [self replaceVietnameseBufferRange:replacementRange withText:aText ?: @""];
++    return;
++  }
++
++  [mEditable.mTextInputDelegate textWillChange:self];
++  [mEditable.mTextInputDelegate selectionWillChange:self];
++  handler->ReplaceRange(replacementRange, aText ?: @"");
++  [mEditable.mTextInputDelegate textDidChange:self];
++  [mEditable.mTextInputDelegate selectionDidChange:self];
++}
++
++// Reports which edit actions should appear in the menu.
++- (BOOL)canPerformAction:(SEL)aAction withSender:(id)aSender {
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return [super canPerformAction:aAction withSender:aSender];
++  }
++
++  NSRange selection = NSMakeRange(NSNotFound, 0);
++  handler->SelectedRange(selection);
++  const bool hasSelection =
++      selection.location != NSNotFound && selection.length > 0;
++  const uint32_t length = [self documentLength];
++
++  if (aAction == @selector(copy:)) {
++    return hasSelection;
++  }
++  if (aAction == @selector(cut:)) {
++    return hasSelection;
++  }
++  if (aAction == @selector(paste:)) {
++    return [UIPasteboard generalPasteboard].hasStrings;
++  }
++  if (aAction == @selector(delete:)) {
++    return hasSelection;
++  }
++  if (aAction == @selector(selectAll:)) {
++    return length > 0 &&
++           !(selection.location == 0 && selection.length == length);
++  }
++
++  return [super canPerformAction:aAction withSender:aSender];
++}
++
++- (void)copy:(id)aSender {
++  if (widget::TextInputHandler* handler = [self textHandler]) {
++    handler->RunCommand(eContentCommandCopy, false);
++  }
++}
++
++- (void)cut:(id)aSender {
++  if (widget::TextInputHandler* handler = [self textHandler]) {
++    [mEditable.mTextInputDelegate textWillChange:self];
++    [mEditable.mTextInputDelegate selectionWillChange:self];
++    handler->RunCommand(eContentCommandCut, false);
++    [mEditable.mTextInputDelegate textDidChange:self];
++    [mEditable.mTextInputDelegate selectionDidChange:self];
++    [self scheduleEditSelectionUpdate];
++  }
++}
++
++- (void)paste:(id)aSender {
++  if (widget::TextInputHandler* handler = [self textHandler]) {
++    [mEditable.mTextInputDelegate textWillChange:self];
++    [mEditable.mTextInputDelegate selectionWillChange:self];
++    handler->RunCommand(eContentCommandPaste, false);
++    [mEditable.mTextInputDelegate textDidChange:self];
++    [mEditable.mTextInputDelegate selectionDidChange:self];
++    [self scheduleEditSelectionUpdate];
++  }
++}
++
++- (void)delete:(id)aSender {
++  if (widget::TextInputHandler* handler = [self textHandler]) {
++    [mEditable.mTextInputDelegate textWillChange:self];
++    handler->RunCommand(eContentCommandDelete, false);
++    [mEditable.mTextInputDelegate textDidChange:self];
++    [self scheduleEditSelectionUpdate];
++  }
++}
++
++- (void)selectAll:(id)aSender {
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return;
++  }
++
++  uint32_t length = 0;
++  if (!handler->TextLength(length)) {
++    return;
++  }
++
++  [mEditable.mTextInputDelegate selectionWillChange:self];
++  handler->SetSelectedRange(NSMakeRange(0, length));
++  [mEditable.mTextInputDelegate selectionDidChange:self];
++}
++
++// MARK: - UITextInput (Shared)
++
++- (id<UITextInputDelegate>)inputDelegate {
++  return mEditable.mTextInputDelegate;
++}
++
++- (void)setInputDelegate:(id<UITextInputDelegate>)aInputDelegate {
++  mEditable.mTextInputDelegate = aInputDelegate;
++}
++
++- (id<UITextInputTokenizer>)tokenizer {
++  return mEditable.mTokenizer;
++}
++
++- (UIView*)textInputView {
++  return self;
++}
++
++- (UIView*)inputView {
++  if (mGeckoChild && mGeckoChild->IsVirtualKeyboardDisabled()) {
++    static UIView* sHiddenInputView = nil;
++    if (!sHiddenInputView) {
++      sHiddenInputView = [[UIView alloc] initWithFrame:CGRectZero];
++    }
++    return sHiddenInputView;
++  }
++  return nil;
++}
++
++- (UITextRange*)markedTextRange {
++  // Vietnamese IM use the marked range to keep the composing word active while
++  // accents are being decided.
++  if ([self hasVietnameseBuffer] &&
++      mEditable.mVietnameseBufferMarkedRange.location != NSNotFound &&
++      mEditable.mActiveSelectionHandle == GeckoSelectionHandleNone) {
++    NSUInteger bufferLength = [mEditable.mVietnameseBufferText length];
++    NSRange range = mEditable.mVietnameseBufferMarkedRange;
++    if (range.location != NSNotFound && range.location <= bufferLength &&
++        range.length <= bufferLength - range.location) {
++      return [self textRangeForExactRange:range];
++    }
++    [self clearVietnameseMarkedRange];
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return nil;
++  }
++
++  NSRange range = NSMakeRange(NSNotFound, 0);
++  if (!handler->MarkedRange(range) || range.location == NSNotFound) {
++    return nil;
++  }
++
++  return [self textRangeForExactRange:range];
++}
++
++- (NSDictionary*)markedTextStyle {
++  return mEditable.mMarkedTextStyle;
++}
++
++- (void)setMarkedTextStyle:(NSDictionary*)aMarkedTextStyle {
++  if (mEditable.mMarkedTextStyle == aMarkedTextStyle) {
++    return;
++  }
++  [mEditable.mMarkedTextStyle release];
++  mEditable.mMarkedTextStyle = [aMarkedTextStyle retain];
++}
++
++- (void)setMarkedText:(NSString*)aMarkedText
++        selectedRange:(NSRange)aSelectedRange {
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return;
++  }
++
++  mEditable.mCaretMenuActive = NO;
++  if ([self shouldUseVietnameseIMEPath]) {
++    // On the Vietnamese path, avoid delegate change notifications here. UIKit
++    // re-enters text queries during composition, and those notifications make
++    // the keyboard observe partially-applied Gecko state.
++    [self clearVietnameseBuffer];
++    handler->SetMarkedText(aMarkedText ?: @"", aSelectedRange);
++    [self scheduleEditSelectionUpdate];
++    return;
++  }
++
++  [mEditable.mTextInputDelegate textWillChange:self];
++  [mEditable.mTextInputDelegate selectionWillChange:self];
++  handler->SetMarkedText(aMarkedText ?: @"", aSelectedRange);
++  [mEditable.mTextInputDelegate textDidChange:self];
++  [mEditable.mTextInputDelegate selectionDidChange:self];
++  [self scheduleEditSelectionUpdate];
++}
++
++- (void)unmarkText {
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    if ([self hasVietnameseBuffer]) {
++      [self clearVietnameseMarkedRange];
++    }
++    return;
++  }
++
++  BOOL useVietnameseIMEPath = [self shouldUseVietnameseIMEPath];
++  NSRange markedRange = NSMakeRange(NSNotFound, 0);
++  if (useVietnameseIMEPath && (!handler->MarkedRange(markedRange) ||
++                               markedRange.location == NSNotFound)) {
++    [self clearVietnameseMarkedRange];
++    return;
++  }
++
++  mEditable.mCaretMenuActive = NO;
++  if (useVietnameseIMEPath) {
++    // Same as setMarkedText: do the Gecko operation without delegate calls
++    // while the Vietnamese IM is using the buffer.
++    handler->UnmarkText();
++    [self scheduleEditSelectionUpdate];
++    return;
++  }
++
++  [mEditable.mTextInputDelegate textWillChange:self];
++  [mEditable.mTextInputDelegate selectionWillChange:self];
++  handler->UnmarkText();
++  [mEditable.mTextInputDelegate textDidChange:self];
++  [mEditable.mTextInputDelegate selectionDidChange:self];
++  [self scheduleEditSelectionUpdate];
++}
++
++- (UITextPosition*)beginningOfDocument {
++  return [ChildViewTextPosition positionWithOffset:0];
++}
++
++- (UITextPosition*)endOfDocument {
++  return [ChildViewTextPosition positionWithOffset:[self documentLength]];
++}
++
++- (UITextRange*)textRangeFromPosition:(UITextPosition*)aFromPosition
++                           toPosition:(UITextPosition*)aToPosition {
++  ChildViewTextPosition* from = [self textPosForPosition:aFromPosition];
++  ChildViewTextPosition* to = [self textPosForPosition:aToPosition];
++  if (!from || !to) {
++    return nil;
++  }
++  return [ChildViewTextRange rangeWithStart:from end:to];
++}
++
++- (UITextPosition*)positionFromPosition:(UITextPosition*)aPosition
++                                 offset:(NSInteger)aOffset {
++  ChildViewTextPosition* from = [self textPosForPosition:aPosition];
++  if (!from) {
++    return nil;
++  }
++
++  NSInteger candidate = static_cast<NSInteger>(from.offset) + aOffset;
++  if (candidate < 0) {
++    candidate = 0;
++  }
++  return [ChildViewTextPosition
++      positionWithOffset:[self clampOffset:static_cast<NSUInteger>(candidate)]];
++}
++
++- (UITextPosition*)positionFromPosition:(UITextPosition*)aPosition
++                            inDirection:(UITextLayoutDirection)aDirection
++                                 offset:(NSInteger)aOffset {
++  NSInteger signedOffset = aOffset;
++  if (aDirection == UITextLayoutDirectionLeft ||
++      aDirection == UITextLayoutDirectionUp) {
++    signedOffset = -aOffset;
++  }
++  return [self positionFromPosition:aPosition offset:signedOffset];
++}
++
++- (NSComparisonResult)comparePosition:(UITextPosition*)aPosition
++                           toPosition:(UITextPosition*)aOther {
++  ChildViewTextPosition* lhs = [self textPosForPosition:aPosition];
++  ChildViewTextPosition* rhs = [self textPosForPosition:aOther];
++  if (!lhs || !rhs) {
++    return NSOrderedSame;
++  }
++  if (lhs.offset < rhs.offset) {
++    return NSOrderedAscending;
++  }
++  if (lhs.offset > rhs.offset) {
++    return NSOrderedDescending;
++  }
++  return NSOrderedSame;
++}
++
++- (NSInteger)offsetFromPosition:(UITextPosition*)aFrom
++                     toPosition:(UITextPosition*)aToPosition {
++  ChildViewTextPosition* start = [self textPosForPosition:aFrom];
++  ChildViewTextPosition* end = [self textPosForPosition:aToPosition];
++  if (!start || !end) {
++    return 0;
++  }
++  return static_cast<NSInteger>(end.offset) -
++         static_cast<NSInteger>(start.offset);
++}
++
++- (UITextPosition*)positionWithinRange:(UITextRange*)aRange
++                   farthestInDirection:(UITextLayoutDirection)aDirection {
++  ChildViewTextRange* textRange = [self textRangeForTextRange:aRange];
++  if (!textRange) {
++    return nil;
++  }
++
++  switch (aDirection) {
++    case UITextLayoutDirectionLeft:
++    case UITextLayoutDirectionUp:
++      return textRange.start;
++    default:
++      return textRange.end;
++  }
++}
++
++- (UITextRange*)characterRangeByExtendingPosition:(UITextPosition*)aPosition
++                                      inDirection:
++                                          (UITextLayoutDirection)aDirection {
++  ChildViewTextPosition* textPosition = [self textPosForPosition:aPosition];
++  if (!textPosition) {
++    return nil;
++  }
++
++  if (aDirection == UITextLayoutDirectionLeft ||
++      aDirection == UITextLayoutDirectionUp) {
++    UITextPosition* start = [self positionFromPosition:textPosition offset:-1];
++    if (!start) {
++      start = textPosition;
++    }
++    return [self textRangeFromPosition:start toPosition:textPosition];
++  }
++
++  UITextPosition* end = [self positionFromPosition:textPosition offset:1];
++  if (!end) {
++    end = textPosition;
++  }
++  return [self textRangeFromPosition:textPosition toPosition:end];
++}
++
++- (NSWritingDirection)baseWritingDirectionForPosition:(UITextPosition*)aPosition
++                                          inDirection:(UITextStorageDirection)
++                                                          aDirection {
++  return NSWritingDirectionNatural;
++}
++
++- (void)setBaseWritingDirection:(NSWritingDirection)aWritingDirection
++                       forRange:(UITextRange*)aRange {
++}
++
++- (UITextPosition*)closestPositionToPoint:(CGPoint)aPoint
++                              withinRange:(UITextRange*)aRange {
++  (void)aRange;
++  return [self closestPositionToPoint:aPoint];
++}
++
++- (UITextRange*)characterRangeAtPoint:(CGPoint)aPoint {
++  UITextPosition* position = [self closestPositionToPoint:aPoint];
++  if (!position) {
++    return nil;
++  }
++  return [self textRangeFromPosition:position toPosition:position];
++}
++
++// MARK: - UITextInputTraits (Shared)
++
++- (UIKeyboardType)keyboardType {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return UIKeyboardTypeDefault;
++  }
++  return UIKitUtils::GetUIKeyboardType(mGeckoChild->GetInputContext());
++}
++
++- (UIReturnKeyType)returnKeyType {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return UIReturnKeyDefault;
++  }
++  return UIKitUtils::GetUIReturnKeyType(mGeckoChild->GetInputContext());
++}
++
++- (UITextAutocapitalizationType)autocapitalizationType {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return UITextAutocapitalizationTypeNone;
++  }
++  return UIKitUtils::GetUITextAutocapitalizationType(
++      mGeckoChild->GetInputContext());
++}
++
++- (UITextAutocorrectionType)autocorrectionType {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return UITextAutocorrectionTypeDefault;
++  }
++
++  return UIKitUtils::GetUITextAutocorrectionType(
++      mGeckoChild->GetInputContext());
++}
++
++- (BOOL)isSecureTextEntry {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return NO;
++  }
++  if (mGeckoChild->GetInputContext().IsPasswordEditor()) {
++    return YES;
++  }
++  return NO;
++}
++
++// MARK: - UIKeyInput (Shared)
++
++- (void)insertText:(NSString*)aText {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return;
++  }
++  widget::TextInputHandler* handler = mGeckoChild->GetTextInputHandler();
++  if (!handler) {
++    return;
++  }
++
++  NSRange bufferEditRange = NSMakeRange(NSNotFound, 0);
++  BOOL hasBuffer = [self ensureVietnameseBufferWithHandler:handler];
++  mEditable.mCaretMenuActive = NO;
++  if (!hasBuffer) {
++    [mEditable.mTextInputDelegate textWillChange:self];
++    [mEditable.mTextInputDelegate selectionWillChange:self];
++    if (![self isKoreanInputMode] || ![self handleKoreanInsertText:aText
++                                                       withHandler:handler]) {
++      handler->InsertText(aText);
++    }
++    [mEditable.mTextInputDelegate textDidChange:self];
++    [mEditable.mTextInputDelegate selectionDidChange:self];
++    [self scheduleEditSelectionUpdate];
++    return;
++  }
++
++  // The buffer uses visible UIKit offsets; translate back to Gecko offsets
++  // before committing the text change.
++  BOOL hasPendingDelete =
++      mEditable.mVietnamesePendingDeleteRange.location != NSNotFound;
++  NSRange pendingDeleteRange = hasPendingDelete
++                                   ? mEditable.mVietnamesePendingDeleteRange
++                                   : NSMakeRange(NSNotFound, 0);
++  bufferEditRange = mEditable.mVietnameseBufferSelection;
++  NSRange geckoEditRange = [self
++      geckoRangeForVietnameseBufferRange:hasPendingDelete ? pendingDeleteRange
++                                                          : bufferEditRange];
++  handler->SetSelectedRange(geckoEditRange);
++
++  if (hasPendingDelete) {
++    // A previous selected delete was deferred; this insert is the replacement.
++    NSRange geckoPendingDeleteRange =
++        [self geckoRangeForVietnameseBufferRange:pendingDeleteRange];
++    handler->ReplaceRange(geckoPendingDeleteRange, aText ?: @"");
++  } else {
++    handler->InsertText(aText);
++  }
++  [self replaceVietnameseBufferRange:bufferEditRange withText:aText ?: @""];
++  [self scheduleEditSelectionUpdate];
++}
++
++- (void)deleteBackward {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return;
++  }
++  widget::TextInputHandler* handler = mGeckoChild->GetTextInputHandler();
++  if (!handler) {
++    return;
++  }
++
++  BOOL hasBuffer = [self ensureVietnameseBufferWithHandler:handler];
++  mEditable.mCaretMenuActive = NO;
++  if (!hasBuffer) {
++    NSRange deleteRange = [self deleteBackwardRangeWithHandler:handler];
++    if (deleteRange.location == NSNotFound) {
++      return;
++    }
++
++    [mEditable.mTextInputDelegate textWillChange:self];
++    [mEditable.mTextInputDelegate selectionWillChange:self];
++    handler->ReplaceRange(deleteRange, @"");
++    [mEditable.mTextInputDelegate textDidChange:self];
++    [mEditable.mTextInputDelegate selectionDidChange:self];
++    [self scheduleEditSelectionUpdate];
++    return;
++  }
++
++  if (mEditable.mVietnamesePendingDeleteRange.location != NSNotFound) {
++    // Flush any older deferred delete before processing the next one.
++    [self flushVietnamesePendingDelete];
++  }
++
++  NSRange bufferSelection = mEditable.mVietnameseBufferSelection;
++  NSRange deleteRange = [self vietnameseBufferDeleteBackwardRange];
++  if (deleteRange.location == NSNotFound) {
++    return;
++  }
++
++  [self replaceVietnameseBufferRange:deleteRange withText:@""];
++  if (bufferSelection.length) {
++    // Vietnamese IM follow selected deleteBackward with insertText
++    // as a replacement, so defer the Gecko delete briefly.
++    mEditable.mVietnamesePendingDeleteRange = deleteRange;
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:
++                                           @selector(
++                                               flushVietnamesePendingDelete)
++                                         object:nil];
++    [self performSelector:@selector(flushVietnamesePendingDelete)
++               withObject:nil
++               afterDelay:0.08
++                  inModes:@[ NSRunLoopCommonModes ]];
++  } else {
++    handler->ReplaceRange([self geckoRangeForVietnameseBufferRange:deleteRange],
++                          @"");
++  }
++  [self scheduleEditSelectionUpdate];
++}
++
++- (BOOL)hasText {
++  if (!mGeckoChild || mGeckoChild->Destroyed()) {
++    return NO;
++  }
++  widget::InputContext context = mGeckoChild->GetInputContext();
++  if (context.mIMEState.mEnabled == IMEEnabled::Disabled) {
++    return NO;
++  }
++  return YES;
++}
++
++// MARK: UITextInteraction (Shared)
++
++// Lets UIKit text interactions begin and seeds handle tracking.
++- (BOOL)interactionShouldBegin:(UITextInteraction*)aInteraction
++                       atPoint:(CGPoint)aPoint {
++  // Somehow there's a non-owned UITextSelectionInteraction subclass causing
++  // overlapping duplicated selections on modern path CJK. So we allow only our
++  // owned interactions to trigger handle tracking.
++  if (aInteraction != mEditable.mEditableTextInteraction &&
++      aInteraction != mEditable.mNonEditableTextInteraction) {
++    return NO;
++  }
++
++  [self startHandleTrackingAtPoint:aPoint
++                             range:[self selectedRange]
++                           handler:[self textHandler]];
++  return YES;
++}
++
++- (void)interactionWillBegin:(UITextInteraction*)aInteraction {
++  mEditable.mTextInteractionInProgress = YES;
++  [[UIMenuController sharedMenuController] hideMenuFromView:self];
++  [self becomeFirstResponder];
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self updateHandleVisibility];
++  } else {
++    [self setLegacyGrabbersHidden:NO];
++  }
++
++  if (aInteraction != mEditable.mEditableTextInteraction &&
++      aInteraction != mEditable.mNonEditableTextInteraction) {
++    return;
++  }
++}
++
++// Cleans up state after a UIKit text interaction finishes.
++- (void)interactionDidEnd:(UITextInteraction*)aInteraction {
++  mEditable.mTextInteractionInProgress = NO;
++  if (mEditable.mSelectionDisplayInteraction != nil) {
++    [self updateHandleVisibility];
++    [self refreshSelectionUI];
++  } else {
++    [self updateLegacyGrabbers];
++  }
++  [self resetHandleState];
++  [self updateEditMenu];
++
++  if (aInteraction != mEditable.mEditableTextInteraction &&
++      aInteraction != mEditable.mNonEditableTextInteraction) {
++    return;
++  }
++}
++
++@end
++
++// MARK: - ChildView (Modern)
++
++@implementation ChildView (Modern)
++
++- (void)setupModernTextInput {
++  if (Class selectionDisplayInteractionClass =
++          NSClassFromString(@"UITextSelectionDisplayInteraction")) {
++    id selectionDisplayInteraction =
++        [[selectionDisplayInteractionClass alloc] initWithTextInput:self
++                                                           delegate:self];
++    mEditable.mSelectionDisplayInteraction =
++        [selectionDisplayInteraction retain];
++    [self addInteraction:mEditable.mSelectionDisplayInteraction];
++
++    mEditable.mSelectionHandlePanRecognizer = [[UIPanGestureRecognizer alloc]
++        initWithTarget:self
++                action:@selector(panSelectionHandle:)];
++    mEditable.mSelectionHandlePanRecognizer.delegate = self;
++    mEditable.mSelectionHandlePanRecognizer.maximumNumberOfTouches = 1;
++    mEditable.mSelectionHandlePanRecognizer.cancelsTouchesInView = YES;
++    [self addGestureRecognizer:mEditable.mSelectionHandlePanRecognizer];
++  }
++}
++
++- (void)teardownModernTextInput {
++  if ([(id)mEditable.mSelectionDisplayInteraction view] == self) {
++    [self removeInteraction:mEditable.mSelectionDisplayInteraction];
++  }
++  [mEditable.mSelectionDisplayInteraction release];
++  mEditable.mSelectionDisplayInteraction = nil;
++  if (mEditable.mSelectionHandlePanRecognizer) {
++    [self removeGestureRecognizer:mEditable.mSelectionHandlePanRecognizer];
++  }
++  [mEditable.mSelectionHandlePanRecognizer release];
++  mEditable.mSelectionHandlePanRecognizer = nil;
++}
++
++- (void)updateModernTextInteractions {
++  if (!mEditable.mEditableTextInteraction ||
++      !mEditable.mNonEditableTextInteraction) {
++    return;
++  }
++
++  const bool keyboardDisabled =
++      mGeckoChild && mGeckoChild->IsVirtualKeyboardDisabled();
++  if (keyboardDisabled) {
++    if (mEditable.mEditableTextInteraction.view == self) {
++      [self removeInteraction:mEditable.mEditableTextInteraction];
++    }
++    if (mEditable.mNonEditableTextInteraction.view != self) {
++      [self addInteraction:mEditable.mNonEditableTextInteraction];
++    }
++  } else {
++    if (mEditable.mNonEditableTextInteraction.view == self) {
++      [self removeInteraction:mEditable.mNonEditableTextInteraction];
++    }
++    if (mEditable.mEditableTextInteraction.view != self) {
++      [self addInteraction:mEditable.mEditableTextInteraction];
++    }
++  }
++
++  [self updateSelectionActivation];
++}
++
++// Keep iOS 17+ selection display active whenever the editable view
++// owns first responder, even when Gecko changes selection outside UIKit's
++// built-in text gestures.
++- (void)updateSelectionActivation {
++  if (mEditable.mSelectionDisplayInteraction == nil) {
++    return;
++  }
++
++  const BOOL shouldActivate =
++      mGeckoChild && !mGeckoChild->Destroyed() && [self isFirstResponder];
++  const BOOL isActivated =
++      [(id)mEditable.mSelectionDisplayInteraction isActivated];
++  if (isActivated != shouldActivate) {
++    [(id)mEditable.mSelectionDisplayInteraction setActivated:shouldActivate];
++  }
++}
++
++// This is mostly just for hiding the handles when they're offscreen, like when
++// the view is zoomed in and user just drag the view while a selection is active
++// and then the handle become outside of the visible area.
++- (void)updateHandleVisibility {
++  if (mEditable.mSelectionDisplayInteraction == nil) {
++    return;
++  }
++
++  const BOOL hasAttachedTextInteraction =
++      mEditable.mEditableTextInteraction.view == self ||
++      mEditable.mNonEditableTextInteraction.view == self;
++  CGRect visibleBounds = [self selectionBounds];
++  widget::TextInputHandler* handler = [self textHandler];
++  NSRange selectedRange = [self selectedRange];
++  BOOL startEndpointVisible = NO;
++  BOOL endEndpointVisible = NO;
++  if (handler && selectedRange.location != NSNotFound &&
++      selectedRange.length > 0) {
++    const EndpointRects visibleEndpoints =
++        [self visibleHandleRectsForRange:selectedRange handler:handler];
++    startEndpointVisible = visibleEndpoints.hasStart;
++    endEndpointVisible = visibleEndpoints.hasEnd;
++  }
++  NSArray* handleViews =
++      [(id)mEditable.mSelectionDisplayInteraction handleViews];
++  NSUInteger handleIndex = 0;
++  for (UIView* handleView in handleViews) {
++    BOOL shouldHide =
++        hasAttachedTextInteraction && mEditable.mTextInteractionInProgress;
++    if (!shouldHide) {
++      if (selectedRange.location != NSNotFound && selectedRange.length > 0 &&
++          [handleViews count] >= 2) {
++        // UIKit exposes the handle views as an ordered pair, so map index 0/1
++        // to Gecko's start/end endpoint visibility before doing final clipping.
++        if (handleIndex == 0) {
++          shouldHide = !startEndpointVisible;
++        } else if (handleIndex == 1) {
++          shouldHide = !endEndpointVisible;
++        }
++      }
++
++      // Trust Gecko's endpoint visibility over the UIKit handle view's
++      // frame, which includes decorative chrome (teardrop) that may be out
++      // past the editor bounds at line edges (and therefore make the entire
++      // handle hidden although it is supposed to be visible).
++      const BOOL geckoEndpointIsVisible =
++          (handleIndex == 0 && startEndpointVisible) ||
++          (handleIndex == 1 && endEndpointVisible);
++
++      if (!shouldHide && !geckoEndpointIsVisible) {
++        CGRect handleRect = [self convertRect:handleView.bounds
++                                     fromView:handleView];
++        shouldHide = CGRectIsEmpty(visibleBounds) ||
++                     CGRectIsNull(visibleBounds) ||
++                     !CGRectContainsRect(CGRectStandardize(visibleBounds),
++                                         CGRectStandardize(handleRect));
++      }
++    }
++    handleView.hidden = shouldHide;
++    handleIndex++;
++  }
++}
++
++- (void)refreshSelectionUI {
++  if (mEditable.mSelectionDisplayInteraction == nil) {
++    return;
++  }
++
++  [self updateSelectionActivation];
++  if ([(id)mEditable.mSelectionDisplayInteraction isActivated]) {
++    [(id)mEditable.mSelectionDisplayInteraction setNeedsSelectionUpdate];
++  }
++  [NSObject
++      cancelPreviousPerformRequestsWithTarget:self
++                                     selector:@selector(updateHandleVisibility)
++                                       object:nil];
++  [self performSelector:@selector(updateHandleVisibility)
++             withObject:nil
++             afterDelay:0
++                inModes:@[ NSRunLoopCommonModes ]];
++  [self updateHandleVisibility];
++}
++
++- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer*)aGestureRecognizer {
++  if (aGestureRecognizer != mEditable.mSelectionHandlePanRecognizer) {
++    return YES;
++  }
++
++  if (mEditable.mSelectionDisplayInteraction == nil ||
++      !mEditable.mSelectionHandlePanRecognizer) {
++    return NO;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return NO;
++  }
++
++  NSRange range = [self selectedRange];
++  if (range.location == NSNotFound || range.length == 0) {
++    return NO;
++  }
++
++  CGPoint point = [mEditable.mSelectionHandlePanRecognizer locationInView:self];
++  GeckoSelectionHandle handle = [self closestHandleToPoint:point
++                                                     range:range
++                                                   handler:handler];
++  return handle != GeckoSelectionHandleNone;
++}
++
++// Drive visible selection-handle drags on iOS 17+ when the passive
++// selection display interaction is showing the system handles but does not own
++// the drag gesture.
++- (void)panSelectionHandle:(UIPanGestureRecognizer*)aRecognizer {
++  if (mEditable.mSelectionDisplayInteraction == nil ||
++      aRecognizer != mEditable.mSelectionHandlePanRecognizer) {
++    return;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return;
++  }
++
++  CGPoint point = [aRecognizer locationInView:self];
++  switch (aRecognizer.state) {
++    case UIGestureRecognizerStateBegan: {
++      NSRange range = [self selectedRange];
++      [self startHandleTrackingAtPoint:point range:range handler:handler];
++      if (mEditable.mActiveSelectionHandle == GeckoSelectionHandleNone) {
++        return;
++      }
++
++      mEditable.mTextInteractionInProgress = YES;
++      [self becomeFirstResponder];
++      [self refreshSelectionUI];
++      break;
++    }
++    case UIGestureRecognizerStateChanged: {
++      if (mEditable.mActiveSelectionHandle == GeckoSelectionHandleNone ||
++          mEditable.mSelectionHandleAnchorOffset == NSNotFound) {
++        return;
++      }
++
++      // Translate the finger position into a predicted endpoint, then rebuild
++      // the dragged selection range against the fixed anchor offset.
++      ChildViewTextPosition* position =
++          [self textPosForPosition:[self closestPositionToPoint:point]];
++      if (!position) {
++        return;
++      }
++
++      NSUInteger anchorOffset =
++          [self clampOffset:mEditable.mSelectionHandleAnchorOffset];
++      ChildViewTextPosition* anchorPosition =
++          [ChildViewTextPosition positionWithOffset:anchorOffset];
++      ChildViewTextRange* draggedRange =
++          mEditable.mActiveSelectionHandle == GeckoSelectionHandleStart
++              ? [ChildViewTextRange rangeWithStart:position end:anchorPosition]
++              : [ChildViewTextRange rangeWithStart:anchorPosition end:position];
++      [self setSelectedTextRange:draggedRange];
++      [self refreshSelectionUI];
++      break;
++    }
++    case UIGestureRecognizerStateCancelled:
++    case UIGestureRecognizerStateEnded:
++    case UIGestureRecognizerStateFailed: {
++      if (mEditable.mActiveSelectionHandle == GeckoSelectionHandleNone) {
++        return;
++      }
++
++      mEditable.mTextInteractionInProgress = NO;
++      [self refreshSelectionUI];
++      [self resetHandleState];
++      [self updateEditMenu];
++      break;
++    }
++    default:
++      break;
++  }
++}
++
++@end
++
++// MARK: - ChildView (Legacy)
++
++@implementation ChildView (Legacy)
++
++- (void)configureLegacyNonEditableTextInteractionGestures {
++  if (!mEditable.mNonEditableTextInteraction) {
++    return;
++  }
++
++  for (UIGestureRecognizer* gesture in mEditable.mNonEditableTextInteraction
++           .gesturesForFailureRequirements) {
++    gesture.delaysTouchesBegan = NO;
++    gesture.delaysTouchesEnded = NO;
++  }
++}
++
++- (void)updateLegacyTextInteractions {
++  if (!mEditable.mEditableTextInteraction ||
++      !mEditable.mNonEditableTextInteraction) {
++    return;
++  }
++
++  const bool keyboardDisabled =
++      mGeckoChild && mGeckoChild->IsVirtualKeyboardDisabled();
++  if (keyboardDisabled) {
++    if (mEditable.mEditableTextInteraction.view == self) {
++      [self removeInteraction:mEditable.mEditableTextInteraction];
++    }
++    if (mEditable.mNonEditableTextInteraction.view != self) {
++      [self addInteraction:mEditable.mNonEditableTextInteraction];
++    }
++    [self configureLegacyNonEditableTextInteractionGestures];
++  } else {
++    if (mEditable.mNonEditableTextInteraction.view == self) {
++      [self removeInteraction:mEditable.mNonEditableTextInteraction];
++    }
++    if (mEditable.mEditableTextInteraction.view != self) {
++      [self addInteraction:mEditable.mEditableTextInteraction];
++    }
++  }
++}
++
++// Older iOS keeps private selection grabbers alive at the clipped
++// viewport edge, so hide edge-snapped grabbers when the corresponding Gecko
++// endpoint is actually offscreen.
++- (void)updateLegacyGrabbers {
++  if (mEditable.mSelectionDisplayInteraction != nil || !self.window) {
++    return;
++  }
++
++  if (mEditable.mTextInteractionInProgress) {
++    [self setLegacyGrabbersHidden:NO];
++    return;
++  }
++
++  UITextRange* selectedTextRange = [self selectedTextRange];
++  if (!selectedTextRange || [selectedTextRange isEmpty]) {
++    return;
++  }
++
++  CGRect visibleBounds = [self selectionBounds];
++  if (CGRectIsEmpty(visibleBounds) || CGRectIsNull(visibleBounds)) {
++    return;
++  }
++
++  CGRect visibleBoundsInWindow = [self convertRect:visibleBounds
++                                            toView:self.window];
++  BOOL containsStart = NO;
++  BOOL containsEnd = NO;
++
++  // Marks which endpoints are genuinely visible after clipping
++  for (UITextSelectionRect* selectionRect in
++       [self selectionRectsForRange:selectedTextRange]) {
++    containsStart = containsStart || selectionRect.containsStart;
++    containsEnd = containsEnd || selectionRect.containsEnd;
++  }
++
++  NSMutableArray<UIView*>* grabberViews = [NSMutableArray array];
++  CollectViewsOfClass(self.window, @"UISelectionGrabber", grabberViews);
++
++  const CGFloat edgeTolerance = 6.0;
++  for (UIView* grabberView in grabberViews) {
++    CGRect grabberRect = [grabberView convertRect:grabberView.bounds
++                                           toView:self.window];
++    // Legacy grabbers often pin themselves to the viewport edge when the real
++    // endpoint scrolls offscreen. Detect that snapped position and hide only
++    // the endpoint whose selection rects said it is no longer actually visible.
++    const BOOL nearLeftEdge =
++        fabs(CGRectGetMinX(grabberRect) -
++             CGRectGetMinX(visibleBoundsInWindow)) <= edgeTolerance;
++    const BOOL nearRightEdge =
++        fabs(CGRectGetMaxX(grabberRect) -
++             CGRectGetMaxX(visibleBoundsInWindow)) <= edgeTolerance;
++    const BOOL nearTopEdge =
++        fabs(CGRectGetMinY(grabberRect) -
++             CGRectGetMinY(visibleBoundsInWindow)) <= edgeTolerance;
++    const BOOL nearBottomEdge =
++        fabs(CGRectGetMaxY(grabberRect) -
++             CGRectGetMaxY(visibleBoundsInWindow)) <= edgeTolerance;
++
++    BOOL shouldHide = NO;
++    if (!containsStart && (nearLeftEdge || nearTopEdge)) {
++      shouldHide = YES;
++    }
++    if (!containsEnd && (nearRightEdge || nearBottomEdge)) {
++      shouldHide = YES;
++    }
++    grabberView.hidden = shouldHide;
++  }
++}
++
++- (void)setLegacyGrabbersHidden:(BOOL)aHidden {
++  if (mEditable.mSelectionDisplayInteraction != nil || !self.window) {
++    return;
++  }
++
++  NSMutableArray<UIView*>* grabberViews = [NSMutableArray array];
++  CollectViewsOfClass(self.window, @"UISelectionGrabber", grabberViews);
++  for (UIView* grabberView in grabberViews) {
++    grabberView.hidden = aHidden;
++  }
++}
++
++@end
++
++// MARK: - ChildView (Vietnamese)
++
++@implementation ChildView (Vietnamese)
++
++- (BOOL)isVietnameseInputMode {
++  NSString* primaryLanguage = self.textInputMode.primaryLanguage;
++  return primaryLanguage && [primaryLanguage hasPrefix:@"vi"];
++}
++
++- (BOOL)hasVietnameseBuffer {
++  if (!mEditable.mVietnameseBufferText) {
++    return NO;
++  }
++  if ([self isVietnameseInputMode]) {
++    return YES;
++  }
++
++  // Also clear the buffer if the IM changes.
++  [self clearVietnameseBuffer];
++  return NO;
++}
++
++- (BOOL)shouldUseVietnameseIMEPath {
++  return [self hasVietnameseBuffer] || [self isVietnameseInputMode];
++}
++
++// Simply detect the Vietnamese word boundaries using whitespace.
++- (BOOL)isVietnameseWordSeparator:(unichar)aChar {
++  return [[NSCharacterSet whitespaceAndNewlineCharacterSet]
++      characterIsMember:aChar];
++}
++
++// Clears the temporary mirror
++- (void)clearVietnameseBuffer {
++  if (!mEditable.mVietnameseBufferText) {
++    return;
++  }
++  [mEditable.mVietnameseBufferText release];
++  mEditable.mVietnameseBufferText = nil;
++  mEditable.mVietnameseBufferSelection = NSMakeRange(NSNotFound, 0);
++  mEditable.mVietnameseBufferMarkedRange = NSMakeRange(NSNotFound, 0);
++  mEditable.mVietnamesePendingDeleteRange = NSMakeRange(NSNotFound, 0);
++  mEditable.mVietnameseBufferGeckoOffset = 0;
++  mEditable.mVietnameseBufferSyncAttempts = 0;
++}
++
++// Finds the current composing word around a UIKit-visible buffer offset.
++- (NSRange)vietnameseWordRangeAroundOffset:(NSUInteger)aOffset {
++  if (!mEditable.mVietnameseBufferText) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  NSUInteger textLength = [mEditable.mVietnameseBufferText length];
++  if (!textLength) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  NSUInteger offset = std::min(aOffset, textLength);
++  NSUInteger start = offset;
++  // Walk left until the beginning of the word or a separator.
++  while (start > 0 &&
++         ![self isVietnameseWordSeparator:[mEditable.mVietnameseBufferText
++                                              characterAtIndex:start - 1]]) {
++    start--;
++  }
++
++  NSUInteger end = offset;
++  // Walk right for the other half of the same composing word.
++  while (end < textLength &&
++         ![self isVietnameseWordSeparator:[mEditable.mVietnameseBufferText
++                                              characterAtIndex:end]]) {
++    end++;
++  }
++
++  if (start == end) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++  return NSMakeRange(start, end - start);
++}
++
++// Stops reporting local marked text while keeping the buffer text itself.
++- (void)clearVietnameseMarkedRange {
++  if (mEditable.mVietnameseBufferMarkedRange.location == NSNotFound) {
++    return;
++  }
++  mEditable.mVietnameseBufferMarkedRange = NSMakeRange(NSNotFound, 0);
++}
++
++// Maintains the marked word after an edit to the buffer. Empty edits and
++// whitespace commits end Vietnamese word composition.
++- (void)updateVietnameseMarkedRangeAfterReplacingRange:(NSRange)aRange
++                                              withText:(NSString*)aText {
++  if (![self isVietnameseInputMode]) {
++    [self clearVietnameseMarkedRange];
++    return;
++  }
++
++  NSString* text = aText ?: @"";
++  if (![text length]) {
++    [self clearVietnameseMarkedRange];
++    return;
++  }
++
++  for (NSUInteger i = 0; i < [text length]; i++) {
++    // Any separator in the committed text means the composing word is done.
++    if ([self isVietnameseWordSeparator:[text characterAtIndex:i]]) {
++      [self clearVietnameseMarkedRange];
++      return;
++    }
++  }
++
++  NSRange wordRange =
++      [self vietnameseWordRangeAroundOffset:aRange.location + [text length]];
++  if (wordRange.location == NSNotFound) {
++    [self clearVietnameseMarkedRange];
++    return;
++  }
++
++  mEditable.mVietnameseBufferMarkedRange = wordRange;
++}
++
++// Converts a full Gecko text snapshot into the visible text that UIKit expects.
++- (NSString*)normalizedVietnameseBufferText:(NSString*)aText
++                                  selection:(NSRange*)aSelection
++                           geckoStartOffset:(NSUInteger*)aGeckoStartOffset {
++  if (aGeckoStartOffset) {
++    *aGeckoStartOffset = 0;
++  }
++  if (!aText || !mGeckoChild || mGeckoChild->Destroyed()) {
++    return aText ?: @"";
++  }
++
++  // Gecko text queries may include sentinel newlines that are not visible to
++  // UIKit. The Vietnamese buffer stores only visible text.
++  widget::InputContext context = mGeckoChild->GetInputContext();
++  NSString* text = aText;
++  NSUInteger length = [text length];
++  if (!length) {
++    return text;
++  }
++
++  if ([text characterAtIndex:0] == 0x0a) {
++    // Some Gecko text controls expose a leading newline sentinel. Track the
++    // offset so later buffer ranges can be converted back to Gecko ranges.
++    if (aGeckoStartOffset) {
++      *aGeckoStartOffset = 1;
++    }
++    if (aSelection && aSelection->location != NSNotFound) {
++      NSUInteger textLength = length - 1;
++      NSUInteger selectionLocation = std::min(aSelection->location, length);
++      NSUInteger selectionEnd =
++          std::min(aSelection->length, length - selectionLocation) +
++          selectionLocation;
++      NSUInteger location = selectionLocation > 1 ? selectionLocation - 1 : 0;
++      NSUInteger end = selectionEnd > 1 ? selectionEnd - 1 : 0;
++      location = std::min(location, textLength);
++      end = std::min(end, textLength);
++      if (end < location) {
++        end = location;
++      }
++      *aSelection = NSMakeRange(location, end - location);
++    }
++    text = [text substringFromIndex:1];
++    length = [text length];
++  }
++
++  if (!length) {
++    return text;
++  }
++
++  BOOL singleNewline = length == 1 && [text characterAtIndex:0] == 0x0a;
++  // Non-textarea controls may expose a trailing newline sentinel. Drop it when
++  // the current UIKit selection is at that visible end boundary.
++  if ((!singleNewline && context.mHTMLInputType.EqualsLiteral("textarea")) ||
++      [text characterAtIndex:length - 1] != 0x0a || !aSelection ||
++      aSelection->location == NSNotFound || aSelection->location > length) {
++    return text;
++  }
++
++  NSUInteger selectionEnd =
++      std::min(aSelection->length, length - aSelection->location) +
++      aSelection->location;
++  if (selectionEnd != length - 1 && selectionEnd != length) {
++    return text;
++  }
++
++  text = [text substringToIndex:length - 1];
++  if (aSelection && aSelection->location != NSNotFound) {
++    NSUInteger textLength = [text length];
++    NSUInteger location = std::min(aSelection->location, textLength);
++    NSUInteger selectionLength =
++        std::min(aSelection->length, textLength - location);
++    *aSelection = NSMakeRange(location, selectionLength);
++  }
++  return text;
++}
++
++// Starts the Vietnamese mirror from Gecko's current visible text and selection.
++// If the buffer already exists, only cancel pending cleanup work.
++- (BOOL)ensureVietnameseBufferWithHandler:(widget::TextInputHandler*)aHandler {
++  if (![self isVietnameseInputMode]) {
++    [self clearVietnameseBuffer];
++    return NO;
++  }
++
++  if ([self hasVietnameseBuffer]) {
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:
++                                           @selector(
++                                               flushVietnamesePendingDelete)
++                                         object:nil];
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:@selector(clearVietnameseBuffer)
++                                         object:nil];
++    return YES;
++  }
++  if (!aHandler) {
++    return NO;
++  }
++
++  NSRange selection = NSMakeRange(NSNotFound, 0);
++  BOOL usedUIKitSelection = NO;
++
++  // Prefer a UIKit selection that was just set by text interaction,
++  // because, once again, Gecko is lagging behind.
++  if (mEditable.mActiveSelectionHandle == GeckoSelectionHandleNone &&
++      mEditable.mShadowSelectedRange.location != NSNotFound) {
++    selection = mEditable.mShadowSelectedRange;
++    usedUIKitSelection = YES;
++  } else if (!aHandler->SelectedRange(selection) ||
++             selection.location == NSNotFound) {
++    return NO;
++  }
++
++  nsString text;
++  if (!aHandler->TextInRange(NSMakeRange(0, UINT32_MAX), text)) {
++    return NO;
++  }
++
++  NSString* liveText = [NSString
++      stringWithCharacters:reinterpret_cast<const unichar*>(text.BeginReading())
++                    length:text.Length()];
++  NSUInteger geckoStartOffset = 0;
++  liveText = [self normalizedVietnameseBufferText:liveText
++                                        selection:&selection
++                                 geckoStartOffset:&geckoStartOffset];
++  NSUInteger liveLength = [liveText length];
++  NSUInteger location = std::min(selection.location, liveLength);
++  NSUInteger length = std::min(selection.length, liveLength - location);
++
++  mEditable.mVietnameseBufferText = [liveText mutableCopy];
++  mEditable.mVietnameseBufferSelection = NSMakeRange(location, length);
++  mEditable.mVietnameseBufferMarkedRange = NSMakeRange(NSNotFound, 0);
++  mEditable.mVietnamesePendingDeleteRange = NSMakeRange(NSNotFound, 0);
++  mEditable.mVietnameseBufferGeckoOffset = geckoStartOffset;
++  mEditable.mVietnameseBufferSyncAttempts = 0;
++  if (usedUIKitSelection) {
++    mEditable.mShadowSelectedRange = NSMakeRange(NSNotFound, 0);
++  }
++  return YES;
++}
++
++// Clears the mirror only after Gecko has caught up to the same text and
++// selection. Until then, UIKit queries continue to read from the buffer.
++- (BOOL)tryClearSyncedVietnameseBufferWithHandler:
++    (widget::TextInputHandler*)aHandler {
++  if (![self hasVietnameseBuffer] || !aHandler) {
++    return YES;
++  }
++
++  // Keep serving the buffer until Gecko reports matching text and selection.
++  mEditable.mVietnameseBufferSyncAttempts++;
++
++  NSRange liveSelection = NSMakeRange(NSNotFound, 0);
++  nsString liveText;
++  if (!aHandler->SelectedRange(liveSelection) ||
++      !aHandler->TextInRange(NSMakeRange(0, UINT32_MAX), liveText)) {
++    return NO;
++  }
++
++  NSString* liveString =
++      [NSString stringWithCharacters:reinterpret_cast<const unichar*>(
++                                         liveText.BeginReading())
++                              length:liveText.Length()];
++  liveString = [self normalizedVietnameseBufferText:liveString
++                                          selection:&liveSelection
++                                   geckoStartOffset:nullptr];
++  BOOL textMatches =
++      [liveString isEqualToString:mEditable.mVietnameseBufferText];
++  BOOL selectionMatches =
++      NSEqualRanges(liveSelection, mEditable.mVietnameseBufferSelection);
++  if (textMatches && selectionMatches) {
++    if (mEditable.mVietnameseBufferMarkedRange.location != NSNotFound) {
++      // A marked word is still active, so keep the mirror even though Gecko has
++      // the same plain text.
++      return YES;
++    }
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:@selector(clearVietnameseBuffer)
++                                         object:nil];
++    [self performSelector:@selector(clearVietnameseBuffer)
++               withObject:nil
++               afterDelay:0.25
++                  inModes:@[ NSRunLoopCommonModes ]];
++    return YES;
++  }
++
++  if (mEditable.mVietnameseBufferSyncAttempts >= 10) {
++    // Avoid keeping stale state forever if Gecko never reports a matching
++    // snapshot for this composition.
++    [self clearVietnameseBuffer];
++    return YES;
++  }
++
++  return NO;
++}
++
++// Answers UITextInput text queries from the mirror when the requested range is
++// in UIKit-visible coordinates.
++- (NSString*)vietnameseBufferTextInRange:(NSRange)aRange {
++  if (![self hasVietnameseBuffer] || aRange.location == NSNotFound) {
++    return nil;
++  }
++
++  NSUInteger bufferLength = [mEditable.mVietnameseBufferText length];
++  if (aRange.location >= bufferLength) {
++    return @"";
++  }
++
++  NSUInteger length = std::min(aRange.length, bufferLength - aRange.location);
++  return [mEditable.mVietnameseBufferText
++      substringWithRange:NSMakeRange(aRange.location, length)];
++}
++
++// Converts a buffer range back to Gecko coordinates by restoring any hidden
++// leading sentinel offset removed during normalization.
++- (NSRange)geckoRangeForVietnameseBufferRange:(NSRange)aRange {
++  if (aRange.location == NSNotFound) {
++    return aRange;
++  }
++
++  NSUInteger geckoStartOffset = mEditable.mVietnameseBufferGeckoOffset;
++  if (aRange.location > NSUIntegerMax - geckoStartOffset) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  return NSMakeRange(aRange.location + geckoStartOffset, aRange.length);
++}
++
++- (NSRange)geckoRangeForVisibleRange:(NSRange)aRange {
++  if ([self hasVietnameseBuffer]) {
++    return [self geckoRangeForVietnameseBufferRange:aRange];
++  }
++  return aRange;
++}
++
++// Applies an edit to the local mirror first, then updates the local selection
++// and marked word so the next UIKit query sees a consistent state.
++- (void)replaceVietnameseBufferRange:(NSRange)aRange withText:(NSString*)aText {
++  if (![self hasVietnameseBuffer] || aRange.location == NSNotFound) {
++    return;
++  }
++
++  NSUInteger bufferLength = [mEditable.mVietnameseBufferText length];
++  NSUInteger location = std::min(aRange.location, bufferLength);
++  NSUInteger length = std::min(aRange.length, bufferLength - location);
++  NSString* text = aText ?: @"";
++  [mEditable.mVietnameseBufferText
++      replaceCharactersInRange:NSMakeRange(location, length)
++                    withString:text];
++  mEditable.mVietnameseBufferSelection =
++      NSMakeRange(location + [text length], 0);
++  [self updateVietnameseMarkedRangeAfterReplacingRange:NSMakeRange(location,
++                                                                   length)
++                                              withText:text];
++  mEditable.mVietnamesePendingDeleteRange = NSMakeRange(NSNotFound, 0);
++  mEditable.mVietnameseBufferSyncAttempts = 0;
++  [NSObject
++      cancelPreviousPerformRequestsWithTarget:self
++                                     selector:@selector(
++                                                  flushVietnamesePendingDelete)
++                                       object:nil];
++  [NSObject
++      cancelPreviousPerformRequestsWithTarget:self
++                                     selector:@selector(clearVietnameseBuffer)
++                                       object:nil];
++}
++
++// Computes the exact composed-character range that deleteBackward should remove
++// from the mirror.
++- (NSRange)vietnameseBufferDeleteBackwardRange {
++  if (![self hasVietnameseBuffer] ||
++      mEditable.mVietnameseBufferSelection.location == NSNotFound) {
++    return NSMakeRange(NSNotFound, 0);
++  }
++
++  return [self deleteBackwardRangeInText:mEditable.mVietnameseBufferText
++                               selection:mEditable.mVietnameseBufferSelection];
++}
++
++// Applies a deferred Gecko delete when a Vietnamese selected delete was not
++// followed by replacement text.
++- (void)flushVietnamesePendingDelete {
++  if (mEditable.mVietnamesePendingDeleteRange.location == NSNotFound) {
++    return;
++  }
++
++  widget::TextInputHandler* handler = [self textHandler];
++  if (!handler) {
++    return;
++  }
++
++  NSRange deleteRange = mEditable.mVietnamesePendingDeleteRange;
++  mEditable.mVietnamesePendingDeleteRange = NSMakeRange(NSNotFound, 0);
++  NSRange geckoDeleteRange =
++      [self geckoRangeForVietnameseBufferRange:deleteRange];
++  handler->ReplaceRange(geckoDeleteRange, @"");
++}
++
++@end
++
++// MARK: - ChildView (Korean)
++
++namespace {
++
++struct HangulJamoIndices {
++  int leading;
++  int trailing;
++};
++
++constexpr HangulJamoIndices kHangulConsonantIndices[] = {
++    {0, 1},   {1, 2},   {-1, 3},  {2, 4},   {-1, 5},  {-1, 6},
++    {3, 7},   {4, -1},  {5, 8},   {-1, 9},  {-1, 10}, {-1, 11},
++    {-1, 12}, {-1, 13}, {-1, 14}, {-1, 15}, {6, 16},  {7, 17},
++    {8, -1},  {-1, 18}, {9, 19},  {10, 20}, {11, 21}, {12, 22},
++    {13, -1}, {14, 23}, {15, 24}, {16, 25}, {17, 26}, {18, 27}};
++
++int HangulConsonantTableIndex(char16_t aJamo) {
++  if (aJamo < 0x3131 || aJamo > 0x314E) {
++    return -1;
++  }
++  return aJamo - 0x3131;
++}
++
++int HangulLeadingIndex(char16_t aJamo) {
++  const int index = HangulConsonantTableIndex(aJamo);
++  return index >= 0 ? kHangulConsonantIndices[index].leading : -1;
++}
++
++int HangulVowelIndex(char16_t aJamo) {
++  if (aJamo < 0x314F || aJamo > 0x3163) {
++    return -1;
++  }
++  return aJamo - 0x314F;
++}
++
++int HangulTrailingIndex(char16_t aJamo) {
++  const int index = HangulConsonantTableIndex(aJamo);
++  return index >= 0 ? kHangulConsonantIndices[index].trailing : -1;
++}
++
++char16_t HangulCompatibilityVowel(int aVowel) {
++  return static_cast<char16_t>(0x314F + aVowel);
++}
++
++char16_t ComposeHangulSyllable(int aLeading, int aVowel, int aTrailing) {
++  return static_cast<char16_t>(0xAC00 + (aLeading * 21 + aVowel) * 28 +
++                               aTrailing);
++}
++
++bool DecomposeHangulSyllable(char16_t aSyllable, int& aLeading, int& aVowel,
++                             int& aTrailing) {
++  if (aSyllable < 0xAC00 || aSyllable > 0xD7A3) {
++    return false;
++  }
++
++  int offset = aSyllable - 0xAC00;
++  aLeading = offset / (21 * 28);
++  offset %= 21 * 28;
++  aVowel = offset / 28;
++  aTrailing = offset % 28;
++  return true;
++}
++
++bool IsHangulSyllable(char16_t aChar) {
++  return aChar >= 0xAC00 && aChar <= 0xD7A3;
++}
++
++NSString* HangulString(char16_t aFirst, char16_t aSecond = 0) {
++  const unichar chars[] = {static_cast<unichar>(aFirst),
++                           static_cast<unichar>(aSecond)};
++  return [NSString stringWithCharacters:chars length:aSecond ? 2 : 1];
++}
++
++int CombineHangulVowels(int aFirst, int aSecond) {
++  switch ((aFirst << 8) | aSecond) {
++    case (8 << 8) | 0:
++      return 9;
++    case (8 << 8) | 1:
++      return 10;
++    case (8 << 8) | 20:
++      return 11;
++    case (13 << 8) | 4:
++      return 14;
++    case (13 << 8) | 5:
++      return 15;
++    case (13 << 8) | 20:
++      return 16;
++    case (18 << 8) | 20:
++      return 19;
++  }
++  return -1;
++}
++
++int CombineHangulTrailingConsonants(int aFirst, int aSecond) {
++  switch ((aFirst << 8) | aSecond) {
++    case (1 << 8) | 19:
++      return 3;
++    case (4 << 8) | 22:
++      return 5;
++    case (4 << 8) | 27:
++      return 6;
++    case (8 << 8) | 1:
++      return 9;
++    case (8 << 8) | 16:
++      return 10;
++    case (8 << 8) | 17:
++      return 11;
++    case (8 << 8) | 19:
++      return 12;
++    case (8 << 8) | 25:
++      return 13;
++    case (8 << 8) | 26:
++      return 14;
++    case (8 << 8) | 27:
++      return 15;
++    case (17 << 8) | 19:
++      return 18;
++  }
++  return -1;
++}
++
++bool HangulLeadingIndexFromTrailing(int aTrailing, int& aLeading) {
++  constexpr int kTrailingToLeading[] = {-1, 0,  1,  -1, 2,  -1, -1, 3, 5,  -1,
++                                        -1, -1, -1, -1, -1, -1, 6,  7, -1, 9,
++                                        10, 11, 12, 14, 15, 16, 17, 18};
++  if (aTrailing <= 0 || aTrailing >= 28 || kTrailingToLeading[aTrailing] < 0) {
++    return false;
++  }
++  aLeading = kTrailingToLeading[aTrailing];
++  return true;
++}
++
++bool SplitHangulTrailingConsonants(int aTrailing, int& aFirstTrailing,
++                                   int& aSecondLeading) {
++  constexpr HangulJamoIndices kTrailingSplit[] = {
++      {-1, -1}, {-1, -1}, {-1, -1}, {1, 9},   {-1, -1}, {4, 12},  {4, 18},
++      {-1, -1}, {-1, -1}, {8, 0},   {8, 6},   {8, 7},   {8, 9},   {8, 16},
++      {8, 17},  {8, 18},  {-1, -1}, {-1, -1}, {17, 9},  {-1, -1}, {-1, -1},
++      {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}};
++  if (aTrailing <= 0 || aTrailing >= 28 ||
++      kTrailingSplit[aTrailing].leading < 0) {
++    return false;
++  }
++  aFirstTrailing = kTrailingSplit[aTrailing].leading;
++  aSecondLeading = kTrailingSplit[aTrailing].trailing;
++  return true;
++}
++
++}  // namespace
++
++@implementation ChildView (Korean)
++
++- (BOOL)isKoreanInputMode {
++  NSString* primaryLanguage = self.textInputMode.primaryLanguage;
++  return primaryLanguage && [primaryLanguage hasPrefix:@"ko"];
++}
++
++- (void)clearKoreanCompositionState {
++  [mEditable.mKoreanComposedText release];
++  mEditable.mKoreanComposedText = nil;
++}
++
++- (BOOL)handleKoreanInsertText:(NSString*)aText
++                   withHandler:(widget::TextInputHandler*)aHandler {
++  if ([aText length] == 1 && IsHangulSyllable([aText characterAtIndex:0]) &&
++      mEditable.mKoreanComposedText &&
++      [mEditable.mKoreanComposedText isEqualToString:aText]) {
++    [self clearKoreanCompositionState];
++    return YES;
++  }
++
++  return [self tryComposeHangulJamo:aText withHandler:aHandler];
++}
++
++- (BOOL)tryComposeHangulJamo:(NSString*)aText
++                 withHandler:(widget::TextInputHandler*)aHandler {
++  if (!aHandler || !aText || [aText length] != 1) {
++    return NO;
++  }
++
++  const char16_t inserted = [aText characterAtIndex:0];
++  const int insertedLeading = HangulLeadingIndex(inserted);
++  const int insertedVowel = HangulVowelIndex(inserted);
++  const int insertedTrailing = HangulTrailingIndex(inserted);
++  if (insertedLeading < 0 && insertedVowel < 0 && insertedTrailing < 0) {
++    return NO;
++  }
++
++  NSRange selection = NSMakeRange(NSNotFound, 0);
++  if (!aHandler->SelectedRange(selection) || selection.location == NSNotFound ||
++      selection.length != 0 || selection.location == 0) {
++    return NO;
++  }
++
++  nsString previousText;
++  if (!aHandler->TextInRange(NSMakeRange(selection.location - 1, 1),
++                             previousText) ||
++      previousText.Length() != 1) {
++    return NO;
++  }
++
++  const char16_t previous = previousText[0];
++  NSString* replacement = nil;
++
++  if (insertedVowel >= 0) {
++    const int previousLeading = HangulLeadingIndex(previous);
++    if (previousLeading >= 0) {
++      replacement = HangulString(
++          ComposeHangulSyllable(previousLeading, insertedVowel, 0));
++    }
++
++    const int previousVowel = HangulVowelIndex(previous);
++    if (!replacement && previousVowel >= 0) {
++      const int combinedVowel =
++          CombineHangulVowels(previousVowel, insertedVowel);
++      if (combinedVowel >= 0) {
++        replacement = HangulString(HangulCompatibilityVowel(combinedVowel));
++      }
++    }
++
++    int leading = 0;
++    int vowel = 0;
++    int trailing = 0;
++    if (!replacement &&
++        DecomposeHangulSyllable(previous, leading, vowel, trailing)) {
++      if (trailing == 0) {
++        const int combinedVowel = CombineHangulVowels(vowel, insertedVowel);
++        if (combinedVowel >= 0) {
++          replacement =
++              HangulString(ComposeHangulSyllable(leading, combinedVowel, 0));
++        }
++      } else {
++        int previousTrailing = 0;
++        int nextLeading = 0;
++        if (!SplitHangulTrailingConsonants(trailing, previousTrailing,
++                                           nextLeading) &&
++            !HangulLeadingIndexFromTrailing(trailing, nextLeading)) {
++          return NO;
++        }
++
++        replacement = HangulString(
++            ComposeHangulSyllable(leading, vowel, previousTrailing),
++            ComposeHangulSyllable(nextLeading, insertedVowel, 0));
++      }
++    }
++  } else if (insertedTrailing >= 0) {
++    int leading = 0;
++    int vowel = 0;
++    int trailing = 0;
++    if (DecomposeHangulSyllable(previous, leading, vowel, trailing)) {
++      if (trailing == 0) {
++        replacement = HangulString(
++            ComposeHangulSyllable(leading, vowel, insertedTrailing));
++      } else {
++        const int combinedTrailing =
++            CombineHangulTrailingConsonants(trailing, insertedTrailing);
++        if (combinedTrailing >= 0) {
++          replacement = HangulString(
++              ComposeHangulSyllable(leading, vowel, combinedTrailing));
++        }
++      }
++    }
++  }
++
++  if (!replacement) {
++    return NO;
++  }
++
++  NSRange replacementRange = NSMakeRange(selection.location - 1, 1);
++  if (!aHandler->ReplaceRange(replacementRange, replacement)) {
++    [self clearKoreanCompositionState];
++    return NO;
++  }
++
++  [mEditable.mKoreanComposedText release];
++  mEditable.mKoreanComposedText = [replacement copy];
++  return YES;
++}
++
++@end

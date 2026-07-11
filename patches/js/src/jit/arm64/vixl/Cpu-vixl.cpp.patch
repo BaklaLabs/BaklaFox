@@ -1,0 +1,43 @@
+diff --git a/js/src/jit/arm64/vixl/Cpu-vixl.cpp b/js/src/jit/arm64/vixl/Cpu-vixl.cpp
+index b05d52402d47..734d452b1548 100644
+--- a/js/src/jit/arm64/vixl/Cpu-vixl.cpp
++++ b/js/src/jit/arm64/vixl/Cpu-vixl.cpp
+@@ -33,6 +33,10 @@
+ #define VIXL_USE_LINUX_HWCAP 1
+ #endif
+ 
++#if defined(XP_DARWIN)
++#include <sys/sysctl.h>
++#endif
++
+ #include "jit/arm64/vixl/Utils-vixl.h"
+ 
+ 
+@@ -385,9 +389,24 @@ CPUFeatures CPU::InferCPUFeaturesFromOS(
+     features.Combine(CPUFeatures::kMTEInstructions);
+   }
+ #elif defined(XP_DARWIN)
+-  // Apple processors have kJSCVT, kDotProduct, and kAtomics features.
+-  features.Combine(CPUFeatures::kJSCVT, CPUFeatures::kDotProduct,
+-                   CPUFeatures::kAtomics);
++  auto has_sysctl_feature = [](const char* name) {
++    int value = 0;
++    size_t size = sizeof(value);
++    return (sysctlbyname(name, &value, &size, nullptr, 0) == 0) && (value != 0);
++  };
++
++  if (has_sysctl_feature("hw.optional.arm.FEAT_JSCVT")) {
++    features.Combine(CPUFeatures::kJSCVT);
++  }
++
++  if (has_sysctl_feature("hw.optional.arm.FEAT_DotProd")) {
++    features.Combine(CPUFeatures::kDotProduct);
++  }
++
++  if (has_sysctl_feature("hw.optional.arm.FEAT_LSE") ||
++      has_sysctl_feature("hw.optional.armv8_1_atomics")) {
++    features.Combine(CPUFeatures::kAtomics);
++  }
+ #endif  // VIXL_USE_LINUX_HWCAP
+ 
+   if ((option == CPUFeatures::kQueryIDRegistersIfAvailable) &&

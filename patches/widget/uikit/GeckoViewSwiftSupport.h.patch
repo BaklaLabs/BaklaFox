@@ -1,0 +1,13 @@
+diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftSupport.h
+index e68fca9134c0..a723338a8f1e 100644
+--- a/widget/uikit/GeckoViewSwiftSupport.h
++++ b/widget/uikit/GeckoViewSwiftSupport.h
+@@ -26,6 +26,8 @@
+ @protocol SwiftGeckoViewRuntime <NSObject>
+ - (id<SwiftEventDispatcher>)runtimeDispatcher;
+ - (id<SwiftEventDispatcher>)dispatcherByName:(const char*)name;
++@optional
++- (void)childProcessDidStartWithPID:(int32_t)pid processType:(NSString*)processType;
+ @end
+ 
+ @protocol GeckoProcessExtension <NSObject>

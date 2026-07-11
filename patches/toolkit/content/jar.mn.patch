@@ -1,0 +1,14 @@
+diff --git a/toolkit/content/jar.mn b/toolkit/content/jar.mn
+index fe28704f35cb..19b988bb8663 100644
+--- a/toolkit/content/jar.mn
++++ b/toolkit/content/jar.mn
+@@ -52,9 +52,7 @@ toolkit.jar:
+    content/global/buildconfig.css
+    content/global/colorpicker.html
+    content/global/contentAreaUtils.js
+-#ifndef MOZ_GECKOVIEW
+    content/global/editMenuOverlay.js
+-#endif
+    content/global/filepicker.properties
+    content/global/customElements.js
+    content/global/globalOverlay.js

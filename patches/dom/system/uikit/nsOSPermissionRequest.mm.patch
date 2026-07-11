@@ -1,0 +1,128 @@
+diff --git a/dom/system/uikit/nsOSPermissionRequest.mm b/dom/system/uikit/nsOSPermissionRequest.mm
+new file mode 100644
+index 000000000000..28cc233b5887
+--- /dev/null
++++ b/dom/system/uikit/nsOSPermissionRequest.mm
+@@ -0,0 +1,122 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#include "nsOSPermissionRequest.h"
++
++#import <AVFoundation/AVFoundation.h>
++
++#include "mozilla/dom/Promise.h"
++#include "nsThreadUtils.h"
++
++using mozilla::dom::Promise;
++
++namespace {
++
++uint16_t PermissionStateForMediaType(AVMediaType aMediaType) {
++  switch ([AVCaptureDevice authorizationStatusForMediaType:aMediaType]) {
++    case AVAuthorizationStatusNotDetermined:
++      return nsIOSPermissionRequest::PERMISSION_STATE_NOTDETERMINED;
++    case AVAuthorizationStatusRestricted:
++      return nsIOSPermissionRequest::PERMISSION_STATE_RESTRICTED;
++    case AVAuthorizationStatusDenied:
++      return nsIOSPermissionRequest::PERMISSION_STATE_DENIED;
++    case AVAuthorizationStatusAuthorized:
++      return nsIOSPermissionRequest::PERMISSION_STATE_AUTHORIZED;
++  }
++
++  return nsIOSPermissionRequest::PERMISSION_STATE_DENIED;
++}
++
++void ResolvePermissionRequest(Promise* aPromise, AVMediaType aMediaType) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  switch ([AVCaptureDevice authorizationStatusForMediaType:aMediaType]) {
++    case AVAuthorizationStatusAuthorized:
++      aPromise->MaybeResolve(true);
++      return;
++    case AVAuthorizationStatusDenied:
++    case AVAuthorizationStatusRestricted:
++      aPromise->MaybeResolve(false);
++      return;
++    case AVAuthorizationStatusNotDetermined:
++      [AVCaptureDevice
++          requestAccessForMediaType:aMediaType
++                  completionHandler:^(BOOL granted) {
++                    NS_DispatchToMainThread(NS_NewRunnableFunction(
++                        __func__, [promise = RefPtr{aPromise}, granted]() {
++                          promise->MaybeResolve(granted);
++                        }));
++                  }];
++      return;
++  }
++
++  aPromise->MaybeResolve(false);
++}
++
++}  // namespace
++
++NS_IMETHODIMP
++nsOSPermissionRequest::GetAudioCapturePermissionState(uint16_t* aAudio) {
++  MOZ_ASSERT(aAudio);
++  *aAudio = PermissionStateForMediaType(AVMediaTypeAudio);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsOSPermissionRequest::GetVideoCapturePermissionState(uint16_t* aVideo) {
++  MOZ_ASSERT(aVideo);
++  *aVideo = PermissionStateForMediaType(AVMediaTypeVideo);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsOSPermissionRequest::RequestVideoCapturePermission(JSContext* aCx,
++                                                     Promise** aPromiseOut) {
++  RefPtr<Promise> promise;
++  nsresult rv = GetPromise(aCx, promise);
++  if (NS_FAILED(rv)) {
++    return rv;
++  }
++
++  if (NS_IsMainThread()) {
++    ResolvePermissionRequest(promise, AVMediaTypeVideo);
++  } else {
++    rv = NS_DispatchToMainThread(NS_NewRunnableFunction(__func__, [promise]() {
++      ResolvePermissionRequest(promise, AVMediaTypeVideo);
++    }));
++    if (NS_FAILED(rv)) {
++      return rv;
++    }
++  }
++
++  promise.forget(aPromiseOut);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsOSPermissionRequest::RequestAudioCapturePermission(JSContext* aCx,
++                                                     Promise** aPromiseOut) {
++  RefPtr<Promise> promise;
++  nsresult rv = GetPromise(aCx, promise);
++  if (NS_FAILED(rv)) {
++    return rv;
++  }
++
++  if (NS_IsMainThread()) {
++    ResolvePermissionRequest(promise, AVMediaTypeAudio);
++  } else {
++    rv = NS_DispatchToMainThread(NS_NewRunnableFunction(__func__, [promise]() {
++      ResolvePermissionRequest(promise, AVMediaTypeAudio);
++    }));
++    if (NS_FAILED(rv)) {
++      return rv;
++    }
++  }
++
++  promise.forget(aPromiseOut);
++  return NS_OK;
++}

@@ -1,0 +1,532 @@
+diff --git a/netwerk/system/ios/nsIOSNetworkLinkService.mm b/netwerk/system/ios/nsIOSNetworkLinkService.mm
+new file mode 100644
+index 000000000000..02575b43ffa5
+--- /dev/null
++++ b/netwerk/system/ios/nsIOSNetworkLinkService.mm
+@@ -0,0 +1,526 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#include "nsIOSNetworkLinkService.h"
++
++#include <algorithm>
++#include <net/if.h>
++#include <resolv.h>
++#include <vector>
++
++#include <CFNetwork/CFProxySupport.h>
++
++#include "LinkServiceCommon.h"
++#include "mozilla/Base64.h"
++#include "mozilla/Logging.h"
++#include "mozilla/SHA1.h"
++#include "mozilla/Services.h"
++#include "mozilla/StaticPrefs_network.h"
++#include "nsCOMPtr.h"
++#include "nsIObserverService.h"
++#include "nsNetAddr.h"
++#include "nsPrintfCString.h"
++#include "nsServiceManagerUtils.h"
++#include "nsThreadUtils.h"
++
++using namespace mozilla;
++
++static LazyLogModule gNotifyAddrLog("nsIOSNetworkLinkService");
++#define LOG(args) MOZ_LOG(gNotifyAddrLog, mozilla::LogLevel::Debug, args)
++
++static Atomic<bool, Relaxed> sHasNonLocalIPv6{true};
++
++NS_IMPL_ISUPPORTS(nsIOSNetworkLinkService, nsINetworkLinkService, nsIObserver)
++
++nsIOSNetworkLinkService::nsIOSNetworkLinkService()
++    : mMutex("nsIOSNetworkLinkService::mMutex") {}
++
++nsIOSNetworkLinkService::~nsIOSNetworkLinkService() { Shutdown(); }
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetIsLinkUp(bool* aIsUp) {
++  MutexAutoLock lock(mMutex);
++  *aIsUp = mState.mLinkUp;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetLinkStatusKnown(bool* aIsKnown) {
++  MutexAutoLock lock(mMutex);
++  *aIsKnown = mState.mStatusKnown;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetLinkType(uint32_t* aLinkType) {
++  NS_ENSURE_ARG_POINTER(aLinkType);
++
++  MutexAutoLock lock(mMutex);
++  *aLinkType = mState.mLinkType;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetNetworkID(nsACString& aNetworkID) {
++  MutexAutoLock lock(mMutex);
++  aNetworkID = mState.mNetworkID;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetDnsSuffixList(nsTArray<nsCString>& aDnsSuffixList) {
++  MutexAutoLock lock(mMutex);
++  aDnsSuffixList.Clear();
++  aDnsSuffixList.AppendElements(mDNSSuffixList);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetNativeResolvers(
++    nsTArray<mozilla::net::NetAddr>& aResolvers) {
++  MutexAutoLock lock(mMutex);
++  aResolvers.Clear();
++  aResolvers.AppendElements(mResolvers);
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetResolvers(
++    nsTArray<RefPtr<nsINetAddr>>& aResolvers) {
++  nsTArray<mozilla::net::NetAddr> addresses;
++  nsresult rv = GetNativeResolvers(addresses);
++  if (NS_FAILED(rv)) {
++    return rv;
++  }
++
++  aResolvers.Clear();
++  for (const auto& addr : addresses) {
++    aResolvers.AppendElement(MakeRefPtr<nsNetAddr>(&addr));
++  }
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::GetPlatformDNSIndications(
++    uint32_t* aPlatformDNSIndications) {
++  NS_ENSURE_ARG_POINTER(aPlatformDNSIndications);
++
++  bool proxyDetected =
++      StaticPrefs::network_notify_checkForProxies() && ProxyDetected();
++  MutexAutoLock lock(mMutex);
++  mState.mProxyDetected = proxyDetected;
++  uint32_t indications = nsINetworkLinkService::NONE_DETECTED;
++  if (mState.mVPNDetected) {
++    indications |= nsINetworkLinkService::VPN_DETECTED;
++  }
++  if (mState.mProxyDetected) {
++    indications |= nsINetworkLinkService::PROXY_DETECTED;
++  }
++  *aPlatformDNSIndications = indications;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++nsIOSNetworkLinkService::Observe(nsISupports* aSubject, const char* aTopic,
++                                 const char16_t* aData) {
++  if (!strcmp(aTopic, "xpcom-shutdown")) {
++    Shutdown();
++  }
++
++  return NS_OK;
++}
++
++static uint32_t LinkTypeForPath(nw_path_t aPath) {
++  if (nw_path_uses_interface_type(aPath, nw_interface_type_wifi)) {
++    return nsINetworkLinkService::LINK_TYPE_WIFI;
++  }
++  if (nw_path_uses_interface_type(aPath, nw_interface_type_cellular)) {
++    return nsINetworkLinkService::LINK_TYPE_MOBILE;
++  }
++  if (nw_path_uses_interface_type(aPath, nw_interface_type_wired)) {
++    return nsINetworkLinkService::LINK_TYPE_ETHERNET;
++  }
++
++  return nsINetworkLinkService::LINK_TYPE_UNKNOWN;
++}
++
++static void HashCString(SHA1Sum& aSHA1, const nsCString& aValue) {
++  aSHA1.update(aValue.get(), aValue.Length());
++}
++
++nsCString nsIOSNetworkLinkService::NetworkIDForPath(nw_path_t aPath,
++                                                    PathState& aState) {
++  auto hashKeys = MakeUnique<std::vector<nsCString>>();
++  auto* hashKeysPtr = hashKeys.get();
++
++  nw_path_enumerate_interfaces(aPath, ^bool(nw_interface_t aInterface) {
++    nsAutoCString key;
++    const char* name = nw_interface_get_name(aInterface);
++    key.AppendPrintf("%s:%u:%u", name ? name : "",
++                     nw_interface_get_index(aInterface),
++                     nw_interface_get_type(aInterface));
++    hashKeysPtr->push_back(std::move(key));
++    return true;
++  });
++
++  nw_path_enumerate_gateways(aPath, ^bool(nw_endpoint_t aGateway) {
++    char* address = nw_endpoint_copy_address_string(aGateway);
++    if (address) {
++      nsAutoCString key("gateway:"_ns);
++      key.Append(address);
++      hashKeysPtr->push_back(std::move(key));
++      free(address);
++    } else {
++      const char* hostname = nw_endpoint_get_hostname(aGateway);
++      if (!hostname) {
++        return true;
++      }
++      nsAutoCString key("gateway:"_ns);
++      key.Append(hostname);
++      hashKeysPtr->push_back(std::move(key));
++    }
++    return true;
++  });
++
++  if (hashKeys->empty()) {
++    return ""_ns;
++  }
++
++  hashKeys->push_back(nsPrintfCString("ipv4:%d", aState.mHasIPv4));
++  hashKeys->push_back(nsPrintfCString("ipv6:%d", aState.mHasIPv6));
++  hashKeys->push_back(nsPrintfCString("expensive:%d", aState.mExpensive));
++  hashKeys->push_back(nsPrintfCString("constrained:%d", aState.mConstrained));
++  hashKeys->push_back(nsPrintfCString("type:%u", aState.mLinkType));
++  std::sort(hashKeys->begin(), hashKeys->end());
++
++  SHA1Sum sha1;
++  SeedNetworkId(sha1);
++  for (const auto& key : *hashKeys) {
++    HashCString(sha1, key);
++  }
++
++  uint8_t digest[SHA1Sum::kHashSize];
++  sha1.finish(digest);
++
++  nsAutoCString digestString(reinterpret_cast<char*>(digest),
++                             SHA1Sum::kHashSize);
++  nsAutoCString output;
++  nsresult rv = Base64Encode(digestString, output);
++  MOZ_RELEASE_ASSERT(NS_SUCCEEDED(rv));
++  return output;
++}
++
++bool nsIOSNetworkLinkService::VPNDetectedForPath(nw_path_t aPath) {
++  __block bool vpnDetected = false;
++  nw_path_enumerate_interfaces(aPath, ^bool(nw_interface_t aInterface) {
++    const char* name = nw_interface_get_name(aInterface);
++    if (!name) {
++      return true;
++    }
++
++    if (!strncmp(name, "tap", 3) || !strncmp(name, "tun", 3) ||
++        !strncmp(name, "ppp", 3) || !strncmp(name, "ipsec", 5) ||
++        !strncmp(name, "utun", 4)) {
++      vpnDetected = true;
++      return false;
++    }
++
++    return true;
++  });
++
++  return vpnDetected;
++}
++
++static bool ProxySettingEnabled(CFDictionaryRef aSettings, CFStringRef aKey) {
++  CFTypeRef value = CFDictionaryGetValue(aSettings, aKey);
++  if (!value) {
++    return false;
++  }
++
++  CFTypeID type = CFGetTypeID(value);
++  if (type == CFNumberGetTypeID()) {
++    int enabled = 0;
++    return CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberIntType,
++                            &enabled) &&
++           enabled != 0;
++  }
++
++  if (type == CFBooleanGetTypeID()) {
++    return CFBooleanGetValue(static_cast<CFBooleanRef>(value));
++  }
++
++  return false;
++}
++
++bool nsIOSNetworkLinkService::ProxyDetected() {
++  CFDictionaryRef settings = CFNetworkCopySystemProxySettings();
++  if (!settings) {
++    return false;
++  }
++
++  bool detected =
++      ProxySettingEnabled(settings, kCFNetworkProxiesHTTPEnable) ||
++      ProxySettingEnabled(settings, kCFNetworkProxiesProxyAutoConfigEnable);
++  CFRelease(settings);
++
++  return detected;
++}
++
++static void AppendResolver(nsTArray<mozilla::net::NetAddr>& aResolvers,
++                           const sockaddr* aAddress) {
++  if (!aAddress) {
++    return;
++  }
++
++  mozilla::net::NetAddr addr{};
++  if (aAddress->sa_family == AF_INET) {
++    const auto* sin = reinterpret_cast<const struct sockaddr_in*>(aAddress);
++    addr.inet.family = AF_INET;
++    addr.inet.port = sin->sin_port;
++    addr.inet.ip = sin->sin_addr.s_addr;
++  } else if (aAddress->sa_family == AF_INET6) {
++    const auto* sin6 = reinterpret_cast<const struct sockaddr_in6*>(aAddress);
++    addr.inet6.family = AF_INET6;
++    addr.inet6.port = sin6->sin6_port;
++    addr.inet6.flowinfo = sin6->sin6_flowinfo;
++    memcpy(&addr.inet6.ip, &sin6->sin6_addr, sizeof(addr.inet6.ip.u8));
++    addr.inet6.scope_id = sin6->sin6_scope_id;
++  } else {
++    return;
++  }
++
++  if (!aResolvers.Contains(addr)) {
++    aResolvers.AppendElement(addr);
++  }
++}
++
++void nsIOSNetworkLinkService::UpdateDNSConfig() {
++  nsTArray<nsCString> suffixes;
++  nsTArray<mozilla::net::NetAddr> resolvers;
++
++  struct __res_state res;
++  if (res_ninit(&res) == 0) {
++    for (int i = 0; i < MAXDNSRCH; i++) {
++      if (!res.dnsrch[i]) {
++        break;
++      }
++      suffixes.AppendElement(nsCString(res.dnsrch[i]));
++    }
++
++    for (int i = 0; i < res.nscount; i++) {
++      AppendResolver(resolvers,
++                     reinterpret_cast<const sockaddr*>(&res.nsaddr_list[i]));
++    }
++    res_ndestroy(&res);
++  }
++
++  bool suffixesChanged = false;
++  {
++    MutexAutoLock lock(mMutex);
++    suffixesChanged = mDNSSuffixList != suffixes;
++    mDNSSuffixList = std::move(suffixes);
++    mResolvers = std::move(resolvers);
++  }
++
++  if (suffixesChanged) {
++    RefPtr<nsIOSNetworkLinkService> self = this;
++    NS_DispatchToMainThread(NS_NewRunnableFunction(
++        "nsIOSNetworkLinkService::UpdateDNSConfig", [self]() {
++          self->NotifyObservers(NS_DNS_SUFFIX_LIST_UPDATED_TOPIC, nullptr);
++        }));
++  }
++}
++
++void nsIOSNetworkLinkService::ProcessPathUpdate(nw_path_t aPath) {
++  PathState newState;
++  nw_path_status_t status = nw_path_get_status(aPath);
++  newState.mStatusKnown = status != nw_path_status_invalid;
++  newState.mLinkUp = status == nw_path_status_satisfied;
++  newState.mExpensive = nw_path_is_expensive(aPath);
++  newState.mConstrained = nw_path_is_constrained(aPath);
++  newState.mHasIPv4 = nw_path_has_ipv4(aPath);
++  newState.mHasIPv6 = nw_path_has_ipv6(aPath);
++  newState.mVPNDetected = VPNDetectedForPath(aPath);
++  newState.mProxyDetected =
++      StaticPrefs::network_notify_checkForProxies() && ProxyDetected();
++  newState.mLinkType = LinkTypeForPath(aPath);
++  sHasNonLocalIPv6 = newState.mHasIPv6;
++  if (newState.mLinkUp) {
++    newState.mNetworkID = NetworkIDForPath(aPath, newState);
++  }
++
++  bool firstUpdate = false;
++  bool linkChanged = false;
++  bool pathChanged = false;
++  bool linkTypeChanged = false;
++  bool networkIDChanged = false;
++  {
++    MutexAutoLock lock(mMutex);
++    firstUpdate = !mState.mStatusKnown;
++    linkChanged = mState.mLinkUp != newState.mLinkUp ||
++                  mState.mStatusKnown != newState.mStatusKnown;
++    pathChanged = mState.mExpensive != newState.mExpensive ||
++                  mState.mConstrained != newState.mConstrained ||
++                  mState.mHasIPv4 != newState.mHasIPv4 ||
++                  mState.mHasIPv6 != newState.mHasIPv6 ||
++                  mState.mVPNDetected != newState.mVPNDetected ||
++                  mState.mProxyDetected != newState.mProxyDetected ||
++                  mState.mLinkType != newState.mLinkType ||
++                  mState.mNetworkID != newState.mNetworkID;
++    linkTypeChanged = mState.mLinkType != newState.mLinkType;
++    networkIDChanged = mState.mNetworkID != newState.mNetworkID;
++    mState = newState;
++  }
++
++  UpdateDNSConfig();
++
++  RefPtr<nsIOSNetworkLinkService> self = this;
++  if (linkChanged) {
++    const char* data = nullptr;
++    if (!newState.mStatusKnown) {
++      data = NS_NETWORK_LINK_DATA_UNKNOWN;
++    } else {
++      data = newState.mLinkUp ? NS_NETWORK_LINK_DATA_UP
++                              : NS_NETWORK_LINK_DATA_DOWN;
++    }
++    NS_DispatchToMainThread(NS_NewRunnableFunction(
++        "nsIOSNetworkLinkService::ProcessPathUpdate link", [self, data]() {
++          self->NotifyObservers(NS_NETWORK_LINK_TOPIC, data);
++        }));
++  } else if (!firstUpdate && pathChanged &&
++             StaticPrefs::network_notify_changed()) {
++    NS_DispatchToMainThread(NS_NewRunnableFunction(
++        "nsIOSNetworkLinkService::ProcessPathUpdate path", [self]() {
++          self->NotifyObservers(NS_NETWORK_LINK_TOPIC,
++                                NS_NETWORK_LINK_DATA_CHANGED);
++        }));
++  }
++
++  if (!firstUpdate && linkTypeChanged) {
++    const char* data = NS_NETWORK_LINK_TYPE_UNKNOWN;
++    if (newState.mLinkType == nsINetworkLinkService::LINK_TYPE_WIFI) {
++      data = NS_NETWORK_LINK_TYPE_WIFI;
++    } else if (newState.mLinkType == nsINetworkLinkService::LINK_TYPE_MOBILE) {
++      data = NS_NETWORK_LINK_TYPE_MOBILE;
++    } else if (newState.mLinkType ==
++               nsINetworkLinkService::LINK_TYPE_ETHERNET) {
++      data = NS_NETWORK_LINK_TYPE_ETHERNET;
++    }
++
++    NS_DispatchToMainThread(NS_NewRunnableFunction(
++        "nsIOSNetworkLinkService::ProcessPathUpdate link type", [self, data]() {
++          self->NotifyObservers(NS_NETWORK_LINK_TYPE_TOPIC, data);
++        }));
++  }
++
++  if (!firstUpdate && networkIDChanged) {
++    NS_DispatchToMainThread(NS_NewRunnableFunction(
++        "nsIOSNetworkLinkService::ProcessPathUpdate network id", [self]() {
++          self->NotifyObservers(NS_NETWORK_ID_CHANGED_TOPIC, nullptr);
++        }));
++  }
++}
++
++nsresult nsIOSNetworkLinkService::Init() {
++  nsresult rv;
++  nsCOMPtr<nsIObserverService> observerService =
++      mozilla::services::GetObserverService();
++  if (!observerService) {
++    return NS_ERROR_FAILURE;
++  }
++
++  rv = observerService->AddObserver(this, "xpcom-shutdown", false);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  mQueue = dispatch_queue_create("org.mozilla.network-link-service.ios",
++                                 DISPATCH_QUEUE_SERIAL);
++  if (!mQueue) {
++    return NS_ERROR_FAILURE;
++  }
++
++  mMonitor = nw_path_monitor_create();
++  if (!mMonitor) {
++    return NS_ERROR_FAILURE;
++  }
++
++  RefPtr<nsIOSNetworkLinkService> self = this;
++  nw_path_monitor_set_update_handler(mMonitor, ^(nw_path_t aPath) {
++    nw_path_t retainedPath = static_cast<nw_path_t>(nw_retain(aPath));
++    bool shouldProcess = false;
++    {
++      MutexAutoLock lock(self->mMutex);
++      shouldProcess =
++          !self->mPath || !nw_path_is_equal(self->mPath, retainedPath);
++      if (shouldProcess) {
++        if (self->mPath) {
++          nw_release(self->mPath);
++        }
++        self->mPath = retainedPath;
++      }
++    }
++
++    if (shouldProcess) {
++      self->ProcessPathUpdate(retainedPath);
++    } else {
++      nw_release(retainedPath);
++    }
++  });
++
++  nw_path_monitor_set_queue(mMonitor, mQueue);
++  nw_path_monitor_start(mMonitor);
++  return NS_OK;
++}
++
++nsresult nsIOSNetworkLinkService::Shutdown() {
++  nsCOMPtr<nsIObserverService> observerService =
++      mozilla::services::GetObserverService();
++  if (observerService) {
++    observerService->RemoveObserver(this, "xpcom-shutdown");
++  }
++
++  if (mMonitor) {
++    nw_path_monitor_cancel(mMonitor);
++    nw_release(mMonitor);
++    mMonitor = nullptr;
++  }
++
++  {
++    MutexAutoLock lock(mMutex);
++    if (mPath) {
++      nw_release(mPath);
++      mPath = nullptr;
++    }
++  }
++
++  if (mQueue) {
++    dispatch_release(mQueue);
++    mQueue = nullptr;
++  }
++
++  return NS_OK;
++}
++
++void nsIOSNetworkLinkService::NotifyObservers(const char* aTopic,
++                                              const char* aData) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  LOG(("nsIOSNetworkLinkService::NotifyObservers: topic:%s data:%s\n", aTopic,
++       aData ? aData : ""));
++
++  nsCOMPtr<nsIObserverService> observerService =
++      mozilla::services::GetObserverService();
++  if (observerService) {
++    observerService->NotifyObservers(
++        static_cast<nsINetworkLinkService*>(this), aTopic,
++        aData ? NS_ConvertASCIItoUTF16(aData).get() : nullptr);
++  }
++}
++
++// static
++bool nsINetworkLinkService::HasNonLocalIPv6Address() {
++  return sHasNonLocalIPv6;
++}

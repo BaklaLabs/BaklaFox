@@ -1,0 +1,15 @@
+diff --git a/media/libcubeb/src/moz.build b/media/libcubeb/src/moz.build
+index eb61973da700..631f73c255c6 100644
+--- a/media/libcubeb/src/moz.build
++++ b/media/libcubeb/src/moz.build
+@@ -73,6 +73,10 @@ if CONFIG['MOZ_AUDIOUNIT_RUST']:
+             'cubeb_osx_run_loop.c',
+         ]
+         DEFINES['USE_AUDIOUNIT_RUST'] = True
++    if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'uikit':
++        SOURCES += [
++            'cubeb_audiounit_ios.mm',
++        ]
+     DEFINES['USE_AUDIOUNIT'] = True
+ 
+ if CONFIG['MOZ_WASAPI']:

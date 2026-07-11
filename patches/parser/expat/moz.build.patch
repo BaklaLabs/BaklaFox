@@ -1,0 +1,24 @@
+diff --git a/parser/expat/moz.build b/parser/expat/moz.build
+index 8c1842d5a5d3..4bd05d07e885 100644
+--- a/parser/expat/moz.build
++++ b/parser/expat/moz.build
+@@ -19,10 +19,18 @@ EXPORTS += [
+ ]
+ 
+ if CONFIG["MOZ_WASM_SANDBOXING_EXPAT"]:
+-    SOURCES += ['expat/lib/moz_xmltok.c']
++    if CONFIG.get("MOZ_BUILD_APP") == "mobile/ios":
++        SOURCES += expat_sources
++    else:
++        SOURCES += ['expat/lib/moz_xmltok.c']
+ else:
+     SOURCES += expat_sources
+ 
++if CONFIG["MOZ_BUILD_APP"].startswith("mobile/ios"):
++    for source in expat_sources:
++        if source not in SOURCES:
++            SOURCES += [source]
++
+ LOCAL_INCLUDES += [
+     '!/security/rlbox',
+ ]

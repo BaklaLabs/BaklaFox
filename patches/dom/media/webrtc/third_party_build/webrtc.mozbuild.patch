@@ -1,0 +1,13 @@
+diff --git a/dom/media/webrtc/third_party_build/webrtc.mozbuild b/dom/media/webrtc/third_party_build/webrtc.mozbuild
+index 915cb546895a..d88792284a37 100644
+--- a/dom/media/webrtc/third_party_build/webrtc.mozbuild
++++ b/dom/media/webrtc/third_party_build/webrtc.mozbuild
+@@ -32,6 +32,8 @@ if CONFIG["MOZ_WEBRTC"]:
+             DEFINES["WEBRTC_USE_PIPEWIRE"] = True
+     elif CONFIG["OS_TARGET"] == "Darwin":
+         DEFINES["WEBRTC_MAC"] = True
++        if CONFIG["MOZ_WIDGET_TOOLKIT"] == "uikit":
++            DEFINES["WEBRTC_IOS"] = True
+     elif CONFIG["OS_TARGET"] == "WINNT":
+         DEFINES["WEBRTC_WIN"] = True
+         DEFINES["RTC_ENABLE_WIN_WGC"] = True

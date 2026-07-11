@@ -1,0 +1,35 @@
+diff --git a/widget/uikit/ExternalResponseService.h b/widget/uikit/ExternalResponseService.h
+new file mode 100644
+index 000000000000..2285d43d504d
+--- /dev/null
++++ b/widget/uikit/ExternalResponseService.h
+@@ -0,0 +1,29 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef ExternalResponseService_h_
++#define ExternalResponseService_h_
++
++#include "mozilla/StaticPtr.h"
++#include "nsIExternalHelperAppService.h"
++
++class ExternalResponseService : public nsIExternalHelperAppService {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_DECL_NSIEXTERNALHELPERAPPSERVICE
++
++  ExternalResponseService();
++
++  static already_AddRefed<ExternalResponseService> GetSingleton();
++
++ private:
++  virtual ~ExternalResponseService() = default;
++
++  static mozilla::StaticRefPtr<ExternalResponseService> sService;
++};
++
++#endif  // ExternalResponseService_h_

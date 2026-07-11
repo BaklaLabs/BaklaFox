@@ -1,0 +1,53 @@
+diff --git a/js/src/jit/Ion.cpp b/js/src/jit/Ion.cpp
+index 0f60a5d3a9ad..b64a64ae0a5a 100644
+--- a/js/src/jit/Ion.cpp
++++ b/js/src/jit/Ion.cpp
+@@ -46,6 +46,7 @@
+ #include "jit/LIR.h"
+ #include "jit/Lowering.h"
+ #include "jit/PerfSpewer.h"
++#include "jit/ProcessExecutableMemory.h"
+ #include "jit/RangeAnalysis.h"
+ #include "jit/ScalarReplacement.h"
+ #include "jit/ScriptFromCalleeToken.h"
+@@ -163,7 +164,14 @@ bool JitRuntime::initialize(JSContext* cx) {
+ 
+ bool JitRuntime::generateTrampolines(JSContext* cx) {
+   TempAllocator temp(&cx->tempLifoAlloc());
+-  StackMacroAssembler masm(cx, temp);
++  // REYNARD: Keep the trampoline assembler state off this stack frame so iOS
++  // child-process codegen does not trip stack protector checks while emitting
++  // the large trampoline bundle.
++  auto masmStorage = MakeUnique<StackMacroAssembler>(cx, temp);
++  if (!masmStorage) {
++    return false;
++  }
++  StackMacroAssembler& masm = *masmStorage;
+   PerfSpewerRangeRecorder rangeRecorder(masm);
+ 
+   Label bailoutTail;
+@@ -580,16 +588,21 @@ template JitCode* JitCode::New<NoGC>(JSContext* cx, uint8_t* code,
+ void JitCode::copyFrom(MacroAssembler& masm) {
+   // Store the JitCode pointer in the JitCodeHeader so we can recover the
+   // gcthing from relocation tables.
+-  JitCodeHeader::FromExecutable(raw())->init(this);
++    uint8_t* writableAllocation =
++      WritableJitAllocationFromExecutable(allocatedMemory(), allocatedSize());
++    uint8_t* writableRaw = writableAllocation + headerSize_;
++    JitCodeHeader::FromExecutable(writableRaw)->init(this);
+ 
+   insnSize_ = masm.instructionsSize();
+   masm.executableCopy(raw());
+ 
+   jumpRelocTableBytes_ = masm.jumpRelocationTableBytes();
+-  masm.copyJumpRelocationTable(raw() + jumpRelocTableOffset());
++    masm.copyJumpRelocationTable(WritableJitAllocationFromExecutable(
++      raw() + jumpRelocTableOffset(), jumpRelocTableBytes_));
+ 
+   dataRelocTableBytes_ = masm.dataRelocationTableBytes();
+-  masm.copyDataRelocationTable(raw() + dataRelocTableOffset());
++    masm.copyDataRelocationTable(WritableJitAllocationFromExecutable(
++      raw() + dataRelocTableOffset(), dataRelocTableBytes_));
+ 
+   masm.processCodeLabels(raw());
+ }

@@ -1,0 +1,38 @@
+diff --git a/netwerk/protocol/http/HttpConnectionMgrChild.cpp b/netwerk/protocol/http/HttpConnectionMgrChild.cpp
+index f48d028668b7..fe5eeb761334 100644
+--- a/netwerk/protocol/http/HttpConnectionMgrChild.cpp
++++ b/netwerk/protocol/http/HttpConnectionMgrChild.cpp
+@@ -9,6 +9,7 @@
+ #include "HttpTransactionChild.h"
+ #include "AltSvcTransactionChild.h"
+ #include "EventTokenBucket.h"
++#include "mozilla/net/WebTransportHash.h"
+ #include "mozilla/net/WebSocketConnectionChild.h"
+ #include "nsHttpConnectionInfo.h"
+ #include "nsHttpConnectionMgr.h"
+@@ -97,6 +98,25 @@ mozilla::ipc::IPCResult HttpConnectionMgrChild::RecvCancelTransaction(
+   return IPC_OK();
+ }
+ 
++mozilla::ipc::IPCResult HttpConnectionMgrChild::RecvStoreServerCertHashes(
++    const HttpConnectionInfoCloneArgs& aConnInfo, const bool& aNoSpdy,
++    const bool& aNoHttp3,
++    nsTArray<mozilla::ipc::WebTransportHash>&& aServerCertHashes) {
++  RefPtr<nsHttpConnectionInfo> cinfo =
++      nsHttpConnectionInfo::DeserializeHttpConnectionInfoCloneArgs(aConnInfo);
++  nsTArray<RefPtr<nsIWebTransportHash>> nsServerCertHashes;
++  nsServerCertHashes.SetCapacity(aServerCertHashes.Length());
++  for (const auto& hash : aServerCertHashes) {
++    nsCString algorithm = hash.algorithm();
++    nsServerCertHashes.AppendElement(
++        new mozilla::net::WebTransportHash(algorithm, hash.value()));
++  }
++
++  (void)mConnMgr->StoreServerCertHashes(cinfo, aNoSpdy, aNoHttp3,
++                                        std::move(nsServerCertHashes));
++  return IPC_OK();
++}
++
+ namespace {
+ 
+ class SpeculativeConnectionOverrider final

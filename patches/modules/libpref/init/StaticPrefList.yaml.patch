@@ -1,0 +1,284 @@
+diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
+index b96e9d02beda..f162626aead1 100644
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -5763,7 +5763,7 @@
+ # document.createEvent("TouchEvent").
+ - name: dom.w3c_touch_events.legacy_apis.enabled
+   type: bool
+-  value: @IS_ANDROID@
++  value: true
+   mirror: always
+ 
+ # W3C touch events
+@@ -5774,6 +5774,8 @@
+   type: int32_t
+ #if defined(XP_MACOSX)
+   value: 0
++#elif defined(XP_IOS)
++  value: 1
+ #else
+   value: 2
+ #endif
+@@ -5848,7 +5850,7 @@
+ # on aarch64 (Apple Silicon) MacOS.
+ - name: dom.webgpu.enabled
+   type: RelaxedAtomicBool
+-#if defined(XP_WIN) || defined(XP_MACOSX) && defined(MOZ_AARCH64)
++#if defined(XP_WIN) || defined (XP_IOS) || defined(XP_MACOSX) && defined(MOZ_AARCH64)
+   value: true
+ #else
+   value: @IS_EARLY_BETA_OR_EARLIER@
+@@ -5859,7 +5861,7 @@
+ # on a platform that supports the GPU process, else true.
+ - name: dom.webgpu.allow-in-parent
+   type: bool
+-#if defined(XP_WIN) || defined(XP_MACOSX) || defined(ANDROID)
++#if defined(XP_WIN) || defined(XP_MACOSX) || defined(ANDROID) || defined(XP_IOS)
+   value: false
+ #else
+   value: true
+@@ -5869,7 +5871,7 @@
+ # Is support for the Web GPU API enabled on service workers?
+ - name: dom.webgpu.service-workers.enabled
+   type: RelaxedAtomicBool
+-#if defined(XP_WIN) || defined(XP_MACOSX) && defined(MOZ_AARCH64)
++#if defined(XP_WIN) || defined(XP_IOS) || defined(XP_MACOSX) && defined(MOZ_AARCH64)
+   value: true
+ #else
+   value: @IS_EARLY_BETA_OR_EARLIER@
+@@ -5896,7 +5898,7 @@
+ 
+ - name: dom.webgpu.allow-present-without-readback
+   type: RelaxedAtomicBool
+-#if defined(XP_WIN) || defined(XP_MACOSX) || defined(XP_LINUX) && !defined(ANDROID)
++#if defined(XP_WIN) || defined(XP_MACOSX) || defined(XP_IOS) || defined(XP_LINUX) && !defined(ANDROID)
+   value: true
+ #else
+   value: false
+@@ -5906,7 +5908,7 @@
+ # Whether WebGPU's GPUExternalTexture API is enabled.
+ - name: dom.webgpu.external-texture.enabled
+   type: bool
+-#if defined(XP_WIN) || defined(XP_MACOSX)
++#if defined(XP_WIN) || defined(XP_MACOSX) || defined(XP_IOS)
+   value: true
+ #else
+   value: false
+@@ -6424,7 +6426,7 @@
+ # or the parent/main process (false)
+ - name: extensions.webextensions.remote
+   type: RelaxedAtomicBool
+-  value: false
++  value: true
+   mirror: always
+ 
+ # Whether to expose the MockExtensionAPI test interface in tests.
+@@ -7043,6 +7045,8 @@
+   type: bool
+ #if defined(XP_MACOSX) || defined(XP_LINUX) && !defined(ANDROID)
+   value: true
++#elif defined(MOZ_WIDGET_UIKIT)
++  value: true
+ #elif defined(MOZ_WIDGET_ANDROID)
+   value: true
+ #elif defined(XP_WIN)
+@@ -7054,7 +7058,7 @@
+ 
+ - name: gfx.canvas.accelerated.allow-in-parent
+   type: bool
+-#if defined(XP_WIN) || defined(XP_MACOSX) || defined(ANDROID)
++#if defined(XP_WIN) || defined(XP_MACOSX) || defined(ANDROID) || defined(XP_IOS)
+   value: false
+ #else
+   value: true
+@@ -7346,6 +7350,8 @@
+     type: RelaxedAtomicBool
+ #if defined(MOZ_AARCH64) && defined(XP_MACOSX)
+     value: true
++#elif defined(XP_IOS)
++    value: true
+ #else
+     value: false
+ #endif
+@@ -7591,7 +7597,13 @@
+   # backend.
+ -   name: gfx.font_rendering.coretext.enabled
+     type: RelaxedAtomicBool
++#if defined(XP_IOS)
++  # REYNARD: iOS system fonts may restrict cmap/table access; CoreText
++  # shaping preserves correct system fallback behavior (including emoji).
++    value: true
++#else
+     value: false
++#endif
+     mirror: always
+ #endif
+ 
+@@ -9849,7 +9861,7 @@
+ # or executable but never both at the same time. OpenBSD defaults to W^X.
+ - name: javascript.options.content_process_write_protect_code
+   type: bool
+-#if defined(XP_OPENBSD)
++#if defined(XP_IOS) || defined(XP_OPENBSD)
+   value: true
+ #else
+   value: false
+@@ -10024,7 +10036,9 @@
+ 
+ - name: layers.gpu-process.enabled
+   type: bool
+-#if defined(XP_WIN) || defined(MOZ_WIDGET_ANDROID) || defined(XP_MACOSX)
++# REYNARD: Enable GPU process by default on iOS so Rendering launches in a
++# dedicated NSExtension child process.
++#if defined(XP_WIN) || defined(MOZ_WIDGET_ANDROID) || defined(XP_MACOSX) || defined(XP_IOS)
+   value: true
+ #elif defined(MOZ_X11)
+   value: false  # we'd like this to be @IS_NIGHTLY_BUILD@, see Bug 1927058
+@@ -10247,7 +10261,7 @@
+ 
+ - name: layout.accessiblecaret.margin-left
+   type: float
+-  value: -18.5f
++  value: -17.0f
+   mirror: always
+ 
+ - name: layout.accessiblecaret.transition-duration
+@@ -11758,7 +11772,7 @@
+ - name: media.cubeb.sandbox
+   type: bool
+   mirror: always
+-#if defined(XP_LINUX) || defined(XP_WIN) || defined(XP_MACOSX)
++#if defined(XP_LINUX) || defined(XP_WIN) || defined(XP_MACOSX) || defined(XP_IOS)
+   value: true
+ #else
+   value: false
+@@ -12163,6 +12177,8 @@
+   value: true
+ #elif defined(XP_MACOSX)
+   value: true
++#elif defined(XP_IOS)
++  value: true
+ #elif defined(XP_LINUX) && !defined(ANDROID)
+   value: true
+ #elif defined(XP_FREEBSD)
+@@ -12207,6 +12223,8 @@
+   value: true
+ #elif defined(XP_MACOSX)
+   value: true
++#elif defined(XP_IOS)
++  value: true
+ #elif defined(XP_LINUX) && !defined(ANDROID)
+   value: true
+ #elif defined(XP_FREEBSD)
+@@ -12240,6 +12258,8 @@
+   value: true
+ #elif defined(XP_MACOSX)
+   value: true
++#elif defined(XP_IOS)
++  value: true
+ #elif defined(XP_LINUX) && !defined(ANDROID)
+   value: true
+ #elif defined(XP_FREEBSD)
+@@ -12259,6 +12279,8 @@
+   value: true
+ #elif defined(XP_MACOSX)
+   value: true
++#elif defined(XP_IOS)
++  value: true
+ #elif defined(XP_LINUX) && !defined(ANDROID)
+   value: true
+ #elif defined(XP_FREEBSD)
+@@ -12278,6 +12300,8 @@
+   value: true
+ #elif defined(XP_MACOSX)
+   value: true
++#elif defined(XP_IOS)
++  value: true
+ #elif defined(XP_LINUX) && !defined(ANDROID)
+   value: true
+ #elif defined(XP_FREEBSD)
+@@ -12297,6 +12321,8 @@
+   value: true
+ #elif defined(XP_MACOSX)
+   value: true
++#elif defined(XP_IOS)
++  value: true
+ #elif defined(XP_LINUX) && !defined(ANDROID)
+   value: true
+ #elif defined(XP_FREEBSD)
+@@ -12323,7 +12349,7 @@
+   type: RelaxedAtomicBool
+ #if defined(XP_WIN)
+   value: true
+-#elif defined(XP_MACOSX)
++#elif defined(XP_MACOSX) || defined(XP_IOS)
+   value: true
+ #elif defined(XP_LINUX) || defined(ANDROID)
+   value: true
+@@ -12388,7 +12414,7 @@
+ #ifdef MOZ_FFMPEG
+ -   name: media.ffmpeg.enabled
+     type: RelaxedAtomicBool
+-  #if defined(XP_MACOSX)
++  #if defined(XP_MACOSX) || defined(XP_IOS)
+     value: false
+   #else
+     value: true
+@@ -14875,7 +14901,10 @@
+ - name: network.process.enabled
+   type: RelaxedAtomicBool
+   mirror: always
+-#if defined(ANDROID) || defined(MOZ_THUNDERBIRD) || defined(XP_IOS)
++# REYNARD: Enable socket process networking on iOS.
++#if defined(XP_IOS)
++  value: true
++#elif defined(ANDROID) || defined(MOZ_THUNDERBIRD)
+   value: false # see bug 1641427
+ #else
+   value: true
+@@ -14924,7 +14953,13 @@
+ - name: network.http.network_access_on_socket_process.enabled
+   type: RelaxedAtomicBool
+   mirror: always
++  #  value: false
++# REYNARD: Enable socket process networking on iOS.
++#if defined(XP_IOS)
++  value: true
++#else
+   value: false
++#endif
+ 
+ # Telemetry of traffic categories. Whether or not to enable HttpTrafficAnalyzer.
+ - name: network.traffic_analyzer.enabled
+@@ -18864,7 +18899,7 @@
+ # If the service is available, set threads to low-power mode when in the background.
+ - name: threads.use_low_power.enabled
+   type: RelaxedAtomicBool
+-#ifdef XP_MACOSX
++#if defined(XP_MACOSX) || defined(XP_IOS)
+   value: true
+ #else
+   value: @IS_NIGHTLY_BUILD@
+@@ -18873,10 +18908,10 @@
+ 
+ 
+ # If the process priority is set to background, put the main thread in the background.
+-# Currently off by default.
++# Enabled by default where low-power thread QoS is supported.
+ - name: threads.lower_mainthread_priority_in_background.enabled
+   type: bool
+-#ifdef XP_MACOSX
++#if defined(XP_MACOSX) || defined(XP_IOS)
+   value: true
+ #else
+   value: @IS_NIGHTLY_BUILD@
+@@ -19676,7 +19711,7 @@
+ # on a platform that supports the GPU process, else true.
+ - name: webgl.allow-in-parent
+   type: bool
+-#if defined(XP_WIN) || defined(XP_MACOSX) || defined(ANDROID)
++#if defined(XP_WIN) || defined(XP_MACOSX) || defined(ANDROID) || defined(XP_IOS)
+   value: false
+ #else
+   value: true

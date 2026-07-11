@@ -1,0 +1,872 @@
+diff --git a/widget/uikit/nsWindow.mm b/widget/uikit/nsWindow.mm
+index a6edb082d7f0..37ddab568ecf 100644
+--- a/widget/uikit/nsWindow.mm
++++ b/widget/uikit/nsWindow.mm
+@@ -26,6 +26,7 @@
+ 
+ #include "nsWidgetsCID.h"
+ #include "nsGfxCIID.h"
++#include "nsLookAndFeel.h"
+ 
+ #include "gfxPlatform.h"
+ #include "gfxQuartzSurface.h"
+@@ -36,6 +37,7 @@
+ #include "nsQueryObject.h"
+ #include "nsRegion.h"
+ #include "nsTArray.h"
++#include "GeckoEditableSupport.h"
+ #include "TextInputHandler.h"
+ #include "UIKitUtils.h"
+ 
+@@ -44,9 +46,18 @@
+ #include "mozilla/ProfilerLabels.h"
+ #include "mozilla/TouchEvents.h"
+ #include "mozilla/dom/MouseEventBinding.h"
++#include "mozilla/dom/BrowsingContext.h"
++#include "mozilla/dom/WindowContext.h"
+ #include "mozilla/gfx/Logging.h"
++#include "mozilla/gfx/GPUProcessManager.h"
++#include "mozilla/Monitor.h"
+ #include "mozilla/widget/GeckoViewSupport.h"
++#include "mozilla/widget/UIKitCompositorWidget.h"
+ #include "mozilla/layers/NativeLayerCA.h"
++#include "mozilla/layers/CompositorThread.h"
++#include "mozilla/layers/NativeLayerRootRemoteMacParent.h"
++#include "mozilla/layers/PNativeLayerRemote.h"
++#include "mozilla/widget/PlatformWidgetTypes.h"
+ #ifdef ACCESSIBILITY
+ #  include "mozilla/a11y/MUIRootAccessibleProtocol.h"
+ #endif
+@@ -58,24 +69,6 @@
+ using mozilla::dom::Touch;
+ using mozilla::widget::UIKitUtils;
+ 
+-#define ALOG(args...)    \
+-  fprintf(stderr, args); \
+-  fprintf(stderr, "\n")
+-
+-static LayoutDeviceIntPoint UIKitPointsToDevPixels(CGPoint aPoint,
+-                                                   CGFloat aBackingScale) {
+-  return LayoutDeviceIntPoint(NSToIntRound(aPoint.x * aBackingScale),
+-                              NSToIntRound(aPoint.y * aBackingScale));
+-}
+-
+-static CGRect DevPixelsToUIKitPoints(const LayoutDeviceIntRect& aRect,
+-                                     CGFloat aBackingScale) {
+-  return CGRectMake((CGFloat)aRect.x / aBackingScale,
+-                    (CGFloat)aRect.y / aBackingScale,
+-                    (CGFloat)aRect.width / aBackingScale,
+-                    (CGFloat)aRect.height / aBackingScale);
+-}
+-
+ // Used to retain a Cocoa object for the remainder of a method's execution.
+ class nsAutoRetainUIKitObject {
+  public:
+@@ -87,15 +80,16 @@ static CGRect DevPixelsToUIKitPoints(const LayoutDeviceIntRect& aRect,
+ };
+ 
+ #ifdef ACCESSIBILITY
+-@interface ChildView : UIView <UIKeyInput, MUIRootAccessibleProtocol> {
++@interface ChildView : UIView <MUIRootAccessibleProtocol> {
+ #else
+-@interface ChildView : UIView <UIKeyInput> {
++@interface ChildView : UIView {
+ #endif
+  @public
+   nsWindow* mGeckoChild;  // weak ref
+   BOOL mWaitingForPaint;
+   NSMapTable<UITouch*, NSNumber*>* mTouches;
+   int mNextTouchID;
++  GeckoEditableState mEditable;
+ 
+   // The CALayer that wraps Gecko's rendered contents. It's a sublayer of
+   // mPixelHostingView's backing layer. Always non-null.
+@@ -110,9 +104,6 @@ - (id)initWithFrame:(CGRect)inFrame geckoChild:(nsWindow*)inChild;
+ - (void)widgetDestroyed;
+ // Tear down this ChildView
+ - (void)delayedTearDown;
+-- (void)sendMouseEvent:(EventMessage)aType
+-                 point:(LayoutDeviceIntPoint)aPoint
+-                widget:(nsWindow*)aWindow;
+ - (void)handleTap:(UITapGestureRecognizer*)sender;
+ - (BOOL)isUsingMainThreadOpenGL;
+ - (void)drawUsingOpenGL;
+@@ -127,6 +118,7 @@ - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event;
+ - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event;
+ // Reacts to the view being resized.
+ - (void)layoutSubviews;
++- (void)traitCollectionDidChange:(UITraitCollection*)previousTraitCollection;
+ 
+ - (void)markLayerForDisplay;
+ - (CALayer*)rootCALayer;
+@@ -155,12 +147,29 @@ - (UIAccessibilityContainerType)accessibilityContainerType;
+ 
+ @end
+ 
++@interface ChildView (Shared)
++- (void)setupTextInput;
++- (void)teardownTextInput;
++- (void)updateTextInteractions;
++- (void)scheduleResponderBlur;
++- (void)cancelResponderBlur;
++- (void)updateEditMenu;
++- (void)resolveCaretMenuIfPending;
++- (NSRange)selectedRange;
++@end
++
++@interface ChildView (Modern)
++- (void)updateSelectionActivation;
++@end
++
+ @implementation ChildView
+ - (id)initWithFrame:(CGRect)inFrame geckoChild:(nsWindow*)inChild {
+   self.multipleTouchEnabled = YES;
+   if ((self = [super initWithFrame:inFrame])) {
+     mGeckoChild = inChild;
+ 
++    self.backgroundColor = [UIColor systemBackgroundColor];
++
+     mRootCALayer = [[CALayer layer] retain];
+     mRootCALayer.position = CGPointZero;
+     mRootCALayer.bounds = CGRectZero;
+@@ -168,8 +177,6 @@ - (id)initWithFrame:(CGRect)inFrame geckoChild:(nsWindow*)inChild {
+     mRootCALayer.contentsGravity = kCAGravityTopLeft;
+     [[self layer] addSublayer:mRootCALayer];
+   }
+-  ALOG("[ChildView[%p] initWithFrame:] (mGeckoChild = %p)", (void*)self,
+-       (void*)mGeckoChild);
+   self.opaque = YES;
+   self.alpha = 1.0;
+ 
+@@ -177,10 +184,14 @@ - (id)initWithFrame:(CGRect)inFrame geckoChild:(nsWindow*)inChild {
+       [[UITapGestureRecognizer alloc] initWithTarget:self
+                                               action:@selector(handleTap:)];
+   tapRecognizer.numberOfTapsRequired = 1;
++  tapRecognizer.cancelsTouchesInView = NO;
++  tapRecognizer.delaysTouchesBegan = NO;
++  tapRecognizer.delaysTouchesEnded = NO;
+   [self addGestureRecognizer:tapRecognizer];
+ 
+   mTouches = [[NSMapTable alloc] init];
+   mNextTouchID = 0;
++  [self setupTextInput];
+ 
+   // This is managed with weak references by the notification center so that we
+   // do not need to call removeObserver.
+@@ -199,9 +210,26 @@ - (id)initWithFrame:(CGRect)inFrame geckoChild:(nsWindow*)inChild {
+   return self;
+ }
+ 
++- (void)traitCollectionDidChange:(UITraitCollection*)previousTraitCollection {
++  [super traitCollectionDidChange:previousTraitCollection];
++
++  self.backgroundColor = [UIColor systemBackgroundColor];
++
++  if (previousTraitCollection &&
++      self.traitCollection.userInterfaceStyle ==
++          previousTraitCollection.userInterfaceStyle) {
++    return;
++  }
++
++  nsLookAndFeel::SetSystemUsesDarkTheme(
++      self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
++}
++
+ - (void)widgetDestroyed {
+   mGeckoChild = nullptr;
++  [NSObject cancelPreviousPerformRequestsWithTarget:self];
+   [mTouches release];
++  [self teardownTextInput];
+ }
+ 
+ - (void)delayedTearDown {
+@@ -210,8 +238,6 @@ - (void)delayedTearDown {
+ }
+ 
+ - (void)activateWindow:(NSNotification*)notification {
+-  ALOG("[[ChildView[%p] activateWindow]", (void*)self);
+-
+   if (!mGeckoChild) {
+     return;
+   }
+@@ -222,8 +248,6 @@ - (void)activateWindow:(NSNotification*)notification {
+ }
+ 
+ - (void)deactivateWindow:(NSNotification*)notification {
+-  ALOG("[[ChildView[%p] deactivateWindow]", (void*)self);
+-
+   if (!mGeckoChild) {
+     return;
+   }
+@@ -233,30 +257,58 @@ - (void)deactivateWindow:(NSNotification*)notification {
+   }
+ }
+ 
+-- (void)sendMouseEvent:(EventMessage)aType
+-                 point:(LayoutDeviceIntPoint)aPoint
+-                widget:(nsWindow*)aWindow {
+-  MOZ_DIAGNOSTIC_ASSERT(
+-      aType != eContextMenu,
+-      "eContextMenu event may need to be dispatched as WidgetPointerEvent");
+-  WidgetMouseEvent event(true, aType, aWindow, WidgetMouseEvent::eReal);
+-
+-  event.mRefPoint = aPoint;
+-  event.mClickCount = 1;
+-  event.mButton = MouseButton::ePrimary;
+-  event.mInputSource = mozilla::dom::MouseEvent_Binding::MOZ_SOURCE_UNKNOWN;
+-
+-  aWindow->DispatchEvent(&event);
+-}
+-
+ - (void)handleTap:(UITapGestureRecognizer*)sender {
+   if (sender.state == UIGestureRecognizerStateEnded) {
+-    ALOG("[ChildView[%p] handleTap]", self);
+-    LayoutDeviceIntPoint lp = UIKitPointsToDevPixels(
+-        [sender locationInView:self], [self contentScaleFactor]);
+-    [self sendMouseEvent:eMouseMove point:lp widget:mGeckoChild];
+-    [self sendMouseEvent:eMouseDown point:lp widget:mGeckoChild];
+-    [self sendMouseEvent:eMouseUp point:lp widget:mGeckoChild];
++    // REYNARD: UIKit text interactions already handle taps that are placing or
++    // adjusting the caret. Replaying the same tap as a Gecko click resets the
++    // selection after UIKit has positioned it.
++    if (mEditable.mTextInteractionInProgress) {
++      return;
++    }
++
++    BOOL wasFirstResponder = [self isFirstResponder];
++
++    // REYNARD: Save the caret offset before sending events to Gecko so we can
++    // detect whether the caret actually moved once Gecko responds.
++    NSRange preSel = [self selectedRange];
++    NSUInteger preOffset = (wasFirstResponder &&
++                            preSel.location != NSNotFound && preSel.length == 0)
++                               ? preSel.location
++                               : NSNotFound;
++
++    // REYNARD: When re-tapping an already-focused editable field with a
++    // collapsed caret, arm the pending caret-menu flag. Gecko processes mouse
++    // events asynchronously, so we resolve the flag later:
++    //   - If NOTIFY_IME_OF_POSITION_CHANGE arrives (caret moved),
++    //     selectionGeometryChanged cancels the pending menu.
++    //   - If no notification arrives (caret stayed), the fallback timer
++    //     fires and shows the menu.
++    BOOL tapInsideEditor = NO;
++    if (preOffset != NSNotFound && mGeckoChild && [self isFirstResponder]) {
++      LayoutDeviceIntRect editorDevRect;
++      TextInputHandler* handler = mGeckoChild->GetTextInputHandler();
++      if (handler && handler->EditorRect(editorDevRect)) {
++        CGRect editorRect =
++            DevPixelsToUIKitPoints(editorDevRect, [self contentScaleFactor]);
++        if (ClipCGRectToBounds(editorRect, self.bounds)) {
++          tapInsideEditor = CGRectContainsPoint(CGRectStandardize(editorRect),
++                                                [sender locationInView:self]);
++        }
++      }
++    }
++    if (preOffset != NSNotFound && tapInsideEditor) {
++      mEditable.mPreTapCaretOffset = preOffset;
++      mEditable.mPendingCaretMenu = YES;
++      [NSObject
++          cancelPreviousPerformRequestsWithTarget:self
++                                         selector:@selector(
++                                                      resolveCaretMenuIfPending)
++                                           object:nil];
++      [self performSelector:@selector(resolveCaretMenuIfPending)
++                 withObject:nil
++                 afterDelay:0.1
++                    inModes:@[ NSRunLoopCommonModes ]];
++    }
+   }
+ }
+ 
+@@ -288,7 +340,24 @@ - (void)sendTouchEvent:(EventMessage)aType
+ }
+ 
+ - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+-  ALOG("[ChildView[%p] touchesBegan", self);
++  [super touchesBegan:touches withEvent:event];
++
++  // REYNARD: Dismiss the caret callout on any touch-down so that scrolling or
++  // tap-to-reposition hides it immediately. Also cancel any pending
++  // caret-menu resolution.
++  if (mEditable.mCaretMenuActive) {
++    mEditable.mCaretMenuActive = NO;
++    [[UIMenuController sharedMenuController] hideMenuFromView:self];
++  }
++  if (mEditable.mPendingCaretMenu) {
++    mEditable.mPendingCaretMenu = NO;
++    [NSObject
++        cancelPreviousPerformRequestsWithTarget:self
++                                       selector:@selector(
++                                                    resolveCaretMenuIfPending)
++                                         object:nil];
++  }
++
+   if (!mGeckoChild) return;
+ 
+   for (UITouch* touch : touches) {
+@@ -301,7 +370,7 @@ - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+ }
+ 
+ - (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+-  ALOG("[ChildView[%p] touchesCancelled", self);
++  [super touchesCancelled:touches withEvent:event];
+   [self sendTouchEvent:eTouchCancel touches:touches widget:mGeckoChild];
+   for (UITouch* touch : touches) {
+     [mTouches removeObjectForKey:touch];
+@@ -312,7 +381,8 @@ - (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+ }
+ 
+ - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+-  ALOG("[ChildView[%p] touchesEnded", self);
++  [super touchesEnded:touches withEvent:event];
++
+   if (!mGeckoChild) return;
+ 
+   [self sendTouchEvent:eTouchEnd touches:touches widget:mGeckoChild];
+@@ -325,7 +395,8 @@ - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+ }
+ 
+ - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+-  ALOG("[ChildView[%p] touchesMoved", self);
++  [super touchesMoved:touches withEvent:event];
++
+   if (!mGeckoChild) return;
+ 
+   [self sendTouchEvent:eTouchMove
+@@ -333,8 +404,27 @@ - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+                 widget:mGeckoChild];
+ }
+ 
++- (void)didMoveToWindow {
++  [super didMoveToWindow];
++
++  if (!mGeckoChild) {
++    return;
++  }
++
++  // REYNARD: Ensure a detached ChildView does not keep stale responder state
++  // while we mirror activation on ChildView attach/detach transitions.
++  if (![self window] && [self isFirstResponder]) {
++    [self resignFirstResponder];
++  }
++
++  if ([self window] && [self window].isKeyWindow && !self.hidden) {
++    mGeckoChild->NotifyWindowActivationState(true);
++  } else if (![self window]) {
++    mGeckoChild->NotifyWindowActivationState(false);
++  }
++}
++
+ - (void)layoutSubviews {
+-  ALOG("[ChildView[%p] layoutSubviews", self);
+   if (!mGeckoChild ||
+       mGeckoChild->GetWindowType() != nsIWidget::WindowType::TopLevel) {
+     return;
+@@ -351,11 +441,28 @@ - (BOOL)canBecomeFirstResponder {
+   if (!mGeckoChild) {
+     return NO;
+   }
++  return YES;
++}
+ 
+-  if (mGeckoChild->IsVirtualKeyboardDisabled()) {
+-    return NO;
++- (BOOL)becomeFirstResponder {
++  BOOL didBecomeFirstResponder = [super becomeFirstResponder];
++  if (didBecomeFirstResponder &&
++      mEditable.mSelectionDisplayInteraction != nil) {
++    [self updateSelectionActivation];
+   }
+-  return YES;
++  return didBecomeFirstResponder;
++}
++
++- (BOOL)resignFirstResponder {
++  BOOL didResignFirstResponder = [super resignFirstResponder];
++  if (didResignFirstResponder &&
++      mEditable.mSelectionDisplayInteraction != nil) {
++    [self updateSelectionActivation];
++  }
++  if (didResignFirstResponder) {
++    [self updateEditMenu];
++  }
++  return didResignFirstResponder;
+ }
+ 
+ - (void)setNeedsDisplayInRect:(CGRect)aRect {
+@@ -405,7 +512,6 @@ - (BOOL)isUsingMainThreadOpenGL {
+ }
+ 
+ - (void)drawUsingOpenGL {
+-  ALOG("drawUsingOpenGL");
+   AUTO_PROFILER_LABEL("ChildView::drawUsingOpenGL", OTHER);
+ 
+   if (!mGeckoChild->IsVisible()) return;
+@@ -549,86 +655,6 @@ - (void)updateLayer {
+   [(ChildView*)[self superview] updateRootCALayer];
+ }
+ 
+-// UIKeyInput
+-
+-- (void)insertText:(NSString*)text {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return;
+-  }
+-  widget::TextInputHandler* textInputHandler =
+-      mGeckoChild->GetTextInputHandler();
+-  if (!textInputHandler) {
+-    return;
+-  }
+-  textInputHandler->InsertText(text);
+-}
+-
+-- (void)deleteBackward {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return;
+-  }
+-  widget::TextInputHandler* textInputHandler =
+-      mGeckoChild->GetTextInputHandler();
+-  if (!textInputHandler) {
+-    return;
+-  }
+-  textInputHandler->HandleCommand(Command::DeleteCharBackward);
+-}
+-
+-- (BOOL)hasText {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return NO;
+-  }
+-  widget::InputContext context = mGeckoChild->GetInputContext();
+-  if (context.mIMEState.mEnabled == IMEEnabled::Disabled) {
+-    return NO;
+-  }
+-  return YES;
+-}
+-
+-// UITextInputTraits
+-
+-- (UIKeyboardType)keyboardType {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return UIKeyboardTypeDefault;
+-  }
+-  return UIKitUtils::GetUIKeyboardType(mGeckoChild->GetInputContext());
+-}
+-
+-- (UIReturnKeyType)returnKeyType {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return UIReturnKeyDefault;
+-  }
+-  return UIKitUtils::GetUIReturnKeyType(mGeckoChild->GetInputContext());
+-}
+-
+-- (UITextAutocapitalizationType)autocapitalizationType {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return UITextAutocapitalizationTypeNone;
+-  }
+-  return UIKitUtils::GetUITextAutocapitalizationType(
+-      mGeckoChild->GetInputContext());
+-}
+-
+-- (UITextAutocorrectionType)autocorrectionType {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return UITextAutocorrectionTypeDefault;
+-  }
+-
+-  return UIKitUtils::GetUITextAutocorrectionType(
+-      mGeckoChild->GetInputContext());
+-}
+-
+-- (BOOL)isSecureTextEntry {
+-  if (!mGeckoChild || mGeckoChild->Destroyed()) {
+-    return NO;
+-  }
+-  if (mGeckoChild->GetInputContext().IsPasswordEditor()) {
+-    return YES;
+-  }
+-  return NO;
+-}
+-
+ #ifdef ACCESSIBILITY
+ // MUIRootAccessible
+ 
+@@ -745,10 +771,64 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+       mParent(nullptr) {}
+ 
+ nsWindow::~nsWindow() {
++  CloseNativeLayerRemoteParent(true);
++  DestroyNativeLayerRoot();
++
+   [mNativeView widgetDestroyed];  // Safe if mNativeView is nil.
+   TearDownView();                 // Safe if called twice.
+ }
+ 
++void nsWindow::CloseNativeLayerRemoteParent(bool aWaitUntilClosed) {
++  // REYNARD: Drop the remote actor's layer-root reference before we destroy
++  // the UIKit view so the CA root cannot outlive its backing layer tree.
++  RefPtr<NativeLayerRootRemoteMacParent> actor =
++      std::move(mNativeLayerRootRemoteMacParent);
++  if (!actor) {
++    return;
++  }
++
++  MOZ_ASSERT(CompositorThread());
++
++  if (!aWaitUntilClosed) {
++    CompositorThread()->Dispatch(NS_NewRunnableFunction(
++        "nsWindow::CloseNativeLayerRemoteParent", [actor = std::move(actor)]() {
++          actor->Shutdown();
++          actor->Close();
++        }));
++    return;
++  }
++
++  Monitor monitor("nsWindow::CloseNativeLayerRemoteParent");
++  bool didClose = false;
++
++  CompositorThread()->Dispatch(
++      NS_NewRunnableFunction("nsWindow::CloseNativeLayerRemoteParentAndWait",
++                             [actor = std::move(actor), &monitor, &didClose]() {
++                               actor->Shutdown();
++                               actor->Close();
++                               MonitorAutoLock lock(monitor);
++                               didClose = true;
++                               lock.Notify();
++                             }));
++
++  MonitorAutoLock lock(monitor);
++  while (!didClose) {
++    lock.Wait();
++  }
++}
++
++void nsWindow::DestroyNativeLayerRoot() {
++  // REYNARD: Release the retained CA root while the ChildView still owns a
++  // valid backing layer, so the root destructor does not run after UIKit
++  // tears that layer tree down.
++  if (!mNativeLayerRoot) {
++    return;
++  }
++
++  mNativeLayerRoot->SetLayers({});
++  mNativeLayerRoot = nullptr;
++}
++
+ void nsWindow::TearDownView() {
+   if (!mNativeView) return;
+ 
+@@ -770,15 +850,9 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+ 
+ nsresult nsWindow::Create(nsIWidget* aParent, const LayoutDeviceIntRect& aRect,
+                           const widget::InitData& aInitData) {
+-  ALOG("nsWindow[%p]::Create %p [%d %d %d %d]", (void*)this, (void*)aParent,
+-       aRect.x, aRect.y, aRect.width, aRect.height);
+   nsWindow* parent = (nsWindow*)aParent;
+-
+   mBounds = aRect;
+ 
+-  ALOG("nsWindow[%p]::Create bounds: %d %d %d %d", (void*)this, mBounds.x,
+-       mBounds.y, mBounds.width, mBounds.height);
+-
+   // Set defaults which can be overriden from aInitData in BaseCreate
+   mWindowType = WindowType::TopLevel;
+   mBorderStyle = BorderStyle::Default;
+@@ -826,6 +900,8 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+   }
+   mTextInputHandler = nullptr;
+ 
++  CloseNativeLayerRemoteParent(true);
++
+   [mNativeView widgetDestroyed];
+ 
+   nsCOMPtr<nsIWidget> kungFuDeathGrip(this);
+@@ -834,6 +910,8 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+ 
+   // ReportDestroyEvent();
+ 
++  DestroyNativeLayerRoot();
++
+   TearDownView();
+ 
+   nsIWidget::OnDestroy();
+@@ -842,6 +920,17 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+ void nsWindow::Show(bool aState) {
+   if (aState != mVisible) {
+     mNativeView.hidden = aState ? NO : YES;
++
++    // REYNARD: UIKit key-window notifications only fire for the app window, so
++    // tab swaps between ChildViews can miss WindowActivated/WindowDeactivated.
++    // Mirror activation from visibility transitions to keep FocusManager's
++    // active top-level window aligned with the selected Gecko session.
++    if (aState && mNativeView.window.isKeyWindow) {
++      NotifyWindowActivationState(true);
++    } else {
++      NotifyWindowActivationState(false);
++    }
++
+     if (aState) {
+       if (mParent) {
+         [mParent->mNativeView bringSubviewToFront:mNativeView];
+@@ -852,6 +941,26 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+   }
+ }
+ 
++void nsWindow::NotifyWindowActivationState(bool aActive) {
++  // REYNARD: Keep both listener paths aligned so focus ownership tracks the
++  // currently attached/visible ChildView across tab switches and process swaps.
++  if (aActive) {
++    if (mWidgetListener) {
++      mWidgetListener->WindowActivated();
++    }
++    if (mAttachedWidgetListener && mAttachedWidgetListener != mWidgetListener) {
++      mAttachedWidgetListener->WindowActivated();
++    }
++    return;
++  }
++
++  if (mWidgetListener) {
++    mWidgetListener->WindowDeactivated();
++  }
++  if (mAttachedWidgetListener && mAttachedWidgetListener != mWidgetListener) {
++    mAttachedWidgetListener->WindowDeactivated();
++  }
++}
+ void nsWindow::Move(const DesktopPoint& aPoint) {
+   if (!mNativeView || (mBounds.x == aPoint.x && mBounds.y == aPoint.y)) {
+     return;
+@@ -940,6 +1049,31 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+   ReportSizeModeEvent(aMode);
+ }
+ 
++nsresult nsWindow::MakeFullScreen(bool aFullScreen) {
++  MOZ_ASSERT(NS_IsMainThread());
++  EnteredFullScreen(aFullScreen);
++  return NS_OK;
++}
++
++void nsWindow::EnteredFullScreen(bool aFullScreen) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (EventDispatcher* dispatcher = GetEventDispatcher()) {
++    dispatcher->Dispatch(aFullScreen ? u"GeckoView:FullScreenEnter"_ns
++                                     : u"GeckoView:FullScreenExit"_ns,
++                         JS::NullHandleValue);
++  }
++
++  if (mNativeLayerRoot) {
++    mNativeLayerRoot->SetWindowIsFullscreen(aFullScreen);
++  }
++
++  if (nsIWidgetListener* listener = GetWidgetListener()) {
++    mSizeMode = aFullScreen ? nsSizeMode_Fullscreen : nsSizeMode_Normal;
++    listener->SizeModeChanged(mSizeMode);
++  }
++}
++
+ void nsWindow::Invalidate(const LayoutDeviceIntRect& aRect) {
+   if (!mNativeView || !mVisible) return;
+ 
+@@ -982,6 +1116,10 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+ void nsWindow::ReportSizeEvent() {
+   LayoutDeviceIntRect innerBounds = GetClientBounds();
+ 
++  if (mCompositorWidgetDelegate) {
++    mCompositorWidgetDelegate->NotifyClientSizeChanged(innerBounds.Size());
++  }
++
+   if (mWidgetListener) {
+     mWidgetListener->WindowResized(this, innerBounds.Size());
+   }
+@@ -1020,17 +1158,60 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+ 
+   const bool changingEnabledState =
+       aContext.IsInputAttributeChanged(mInputContext);
++  const bool hadFirstResponder = [mNativeView isFirstResponder];
++  const bool focusFromPointerInput =
++      aAction.mCause == InputContextAction::CAUSE_MOUSE ||
++      aAction.mCause == InputContextAction::CAUSE_TOUCH ||
++      aAction.mCause ==
++          InputContextAction::CAUSE_UNKNOWN_DURING_NON_KEYBOARD_INPUT;
++  const bool focusFromKeyboardInput =
++      aAction.mCause == InputContextAction::CAUSE_KEY ||
++      aAction.mCause == InputContextAction::CAUSE_UNKNOWN_DURING_KEYBOARD_INPUT;
+ 
+   mInputContext = aContext;
++  [mNativeView updateTextInteractions];
+ 
+   if (IsVirtualKeyboardDisabled()) {
+-    [mNativeView resignFirstResponder];
++    [mNativeView cancelResponderBlur];
++
++    const bool shouldKeepResponderForSelection =
++        hadFirstResponder ||
++        (aAction.mFocusChange == InputContextAction::GOT_FOCUS &&
++         focusFromPointerInput);
++
++    if (aAction.mFocusChange == InputContextAction::LOST_FOCUS) {
++      // REYNARD: Preserve first responder across keyboard-driven editable
++      // handoffs (e.g. OTP auto-advance) to keep the software keyboard stable.
++      if (!focusFromKeyboardInput) {
++        [mNativeView resignFirstResponder];
++      }
++    } else if (shouldKeepResponderForSelection) {
++      [mNativeView becomeFirstResponder];
++      [mNativeView reloadInputViews];
++    }
++
+     return;
+   }
+ 
+-  [mNativeView becomeFirstResponder];
++  if (aAction.mFocusChange == InputContextAction::LOST_FOCUS) {
++    [mNativeView scheduleResponderBlur];
++    return;
++  }
++
++  // REYNARD: Prevent page-load autofocus from opening the software keyboard
++  // unless focus is clearly user-driven.
++  const bool shouldBecomeFirstResponder =
++      hadFirstResponder || aAction.UserMightRequestOpenVKB() ||
++      (aAction.mFocusChange == InputContextAction::GOT_FOCUS &&
++       (focusFromPointerInput || focusFromKeyboardInput));
++
++  if (shouldBecomeFirstResponder) {
++    [mNativeView cancelResponderBlur];
++    [mNativeView becomeFirstResponder];
++  }
+ 
+-  if (aAction.UserMightRequestOpenVKB() || changingEnabledState) {
++  if ((aAction.UserMightRequestOpenVKB() || changingEnabledState) &&
++      (hadFirstResponder || shouldBecomeFirstResponder)) {
+     // TODO(m_kato):
+     // It is unnecessary to call reloadInputViews with changingEnabledState if
+     // virtual keyboard is disappeared.
+@@ -1050,6 +1231,25 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+   return mInputContext;
+ }
+ 
++void nsWindow::SetCompositorWidgetDelegate(
++    mozilla::widget::CompositorWidgetDelegate* aDelegate) {
++  if (aDelegate) {
++    mCompositorWidgetDelegate = aDelegate->AsPlatformSpecificDelegate();
++  } else {
++    mCompositorWidgetDelegate = nullptr;
++  }
++
++  if (mCompositorWidgetDelegate) {
++    auto clientSize = GetClientBounds().Size();
++    if (clientSize.IsEmpty()) {
++      clientSize = mBounds.Size();
++    }
++    if (!clientSize.IsEmpty()) {
++      mCompositorWidgetDelegate->NotifyClientSizeChanged(clientSize);
++    }
++  }
++}
++
+ widget::TextEventDispatcherListener*
+ nsWindow::GetNativeTextEventDispatcherListener() {
+   return mTextInputHandler;
+@@ -1110,6 +1310,8 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+   return [UIScreen mainScreen].scale;
+ }
+ 
++uint32_t nsWindow::GetMaxTouchPoints() const { return 5; }
++
+ int32_t nsWindow::RoundsWidgetCoordinatesTo() {
+   if (BackingScaleFactor() == 2.0) {
+     return 2;
+@@ -1121,6 +1323,85 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+   return mNativeLayerRoot;
+ }
+ 
++void nsWindow::GetCompositorWidgetInitData(
++    mozilla::widget::CompositorWidgetInitData* aInitData) {
++  CloseNativeLayerRemoteParent(false);
++
++  auto* pm = mozilla::gfx::GPUProcessManager::Get();
++  mozilla::ipc::EndpointProcInfo gpuProcessInfo =
++      pm ? pm->GPUEndpointProcInfo()
++         : mozilla::ipc::EndpointProcInfo::Invalid();
++
++  mozilla::ipc::EndpointProcInfo childProcessInfo =
++      gpuProcessInfo != mozilla::ipc::EndpointProcInfo::Invalid()
++          ? gpuProcessInfo
++          : mozilla::ipc::EndpointProcInfo::Current();
++
++  mozilla::ipc::Endpoint<PNativeLayerRemoteParent> parentEndpoint;
++  mozilla::ipc::Endpoint<PNativeLayerRemoteChild> childEndpoint;
++  auto rv = PNativeLayerRemote::CreateEndpoints(
++      mozilla::ipc::EndpointProcInfo::Current(), childProcessInfo,
++      &parentEndpoint, &childEndpoint);
++  MOZ_RELEASE_ASSERT(NS_SUCCEEDED(rv));
++  MOZ_RELEASE_ASSERT(parentEndpoint.IsValid());
++  MOZ_RELEASE_ASSERT(childEndpoint.IsValid());
++
++  RefPtr<NativeLayerRootRemoteMacParent> nativeLayerRemoteParent =
++      new NativeLayerRootRemoteMacParent(mNativeLayerRoot);
++
++  MOZ_ASSERT(CompositorThread());
++
++  Monitor monitor("nsWindow::GetCompositorWidgetInitData");
++  bool didBindParentEndpoint = false;
++
++  CompositorThread()->Dispatch(NS_NewRunnableFunction(
++      "nsWindow::GetCompositorWidgetInitData bind endpoint", [&]() {
++        MOZ_ALWAYS_TRUE(parentEndpoint.Bind(nativeLayerRemoteParent));
++        MonitorAutoLock lock(monitor);
++        didBindParentEndpoint = true;
++        lock.Notify();
++      }));
++
++  {
++    MonitorAutoLock lock(monitor);
++    while (!didBindParentEndpoint) {
++      lock.Wait();
++    }
++  }
++
++  auto clientSize = GetClientBounds().Size();
++  if (clientSize.IsEmpty()) {
++    clientSize = mBounds.Size();
++  }
++  if (clientSize.IsEmpty()) {
++    clientSize = LayoutDeviceIntSize(1, 1);
++  }
++  *aInitData = mozilla::widget::CocoaCompositorWidgetInitData(
++      clientSize, std::move(childEndpoint));
++
++  mNativeLayerRootRemoteMacParent = std::move(nativeLayerRemoteParent);
++}
++
++void nsWindow::DestroyCompositor() {
++  if (mNativeLayerRoot) {
++    mNativeLayerRoot->SetLayers({});
++  }
++
++  CloseNativeLayerRemoteParent(false);
++
++  nsIWidget::DestroyCompositor();
++}
++
++void nsWindow::NotifyCompositorSessionLost(
++    mozilla::layers::CompositorSession* aSession) {
++  const double kTriggerPaintDelayAfterCompositorSessionLoss = 0.4;
++  [mNativeView performSelector:@selector(markLayerForDisplay)
++                    withObject:nil
++                    afterDelay:kTriggerPaintDelayAfterCompositorSessionLoss];
++
++  nsIWidget::NotifyCompositorSessionLost(aSession);
++}
++
+ void nsWindow::HandleMainThreadCATransaction() {
+   // Trigger a synchronous OMTC composite. This will call NextSurface and
+   // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
+@@ -1275,6 +1556,7 @@ - (void)close {
+ 
+   nsAutoCString url;
+   nsresult rv = Preferences::GetCString("toolkit.defaultChromeURI", url);
++
+   if (NS_FAILED(rv)) {
+     url = "chrome://geckoview/content/geckoview.xhtml"_ns;
+   }

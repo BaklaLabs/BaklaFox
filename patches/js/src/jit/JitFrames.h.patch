@@ -1,0 +1,28 @@
+diff --git a/js/src/jit/JitFrames.h b/js/src/jit/JitFrames.h
+index ac7005a5fcfc..8f0a303683ec 100644
+--- a/js/src/jit/JitFrames.h
++++ b/js/src/jit/JitFrames.h
+@@ -29,6 +29,7 @@ namespace jit {
+ 
+ enum class FrameType;
+ enum class VMFunctionId;
++class IonICStub;
+ class IonScript;
+ class JitActivation;
+ class JitFrameLayout;
+@@ -503,10 +504,15 @@ class IonICCallFrameLayout : public CommonFrameLayout {
+   // Pointer to root the stub's JitCode.
+   JitCode* stubCode_;
+ 
++  // REYNARD: Keep track of the active Ion IC stub so GC can preserve its live
++  // nextCodeRaw_ chain while execution is inside a VM wrapper.
++  IonICStub* stub_;
++
+  public:
+   static constexpr size_t LocallyTracedValueOffset = sizeof(void*);
+ 
+   JitCode** stubCode() { return &stubCode_; }
++  IonICStub* stub() const { return stub_; }
+   static size_t Size() { return sizeof(IonICCallFrameLayout); }
+ 
+   inline Value* locallyTracedValuePtr(size_t index) {

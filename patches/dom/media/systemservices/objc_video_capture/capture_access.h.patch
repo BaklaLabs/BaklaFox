@@ -1,0 +1,34 @@
+diff --git a/dom/media/systemservices/objc_video_capture/capture_access.h b/dom/media/systemservices/objc_video_capture/capture_access.h
+new file mode 100644
+index 000000000000..76b2de681404
+--- /dev/null
++++ b/dom/media/systemservices/objc_video_capture/capture_access.h
+@@ -0,0 +1,28 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef mozilla_camera_capture_access_h
++#define mozilla_camera_capture_access_h
++
++#include "mozilla/MozPromise.h"
++#include "mozilla/media/CamerasTypes.h"
++#include "nsError.h"
++#include "nsStringFwd.h"
++
++namespace mozilla::camera {
++
++using CaptureAccessPromise =
++    MozPromise<CamerasAccessStatus, nsresult, /* IsExclusive = */ false>;
++
++RefPtr<CaptureAccessPromise> RequestAVCaptureAccess(bool aRequestCamera,
++                                                    bool aRequestMicrophone);
++CaptureDeviceFacingMode GetAVCaptureDeviceFacingMode(
++    const nsACString& aUniqueId);
++
++}  // namespace mozilla::camera
++
++#endif  // mozilla_camera_capture_access_h

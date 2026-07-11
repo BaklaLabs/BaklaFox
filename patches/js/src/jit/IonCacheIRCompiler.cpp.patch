@@ -1,0 +1,44 @@
+diff --git a/js/src/jit/IonCacheIRCompiler.cpp b/js/src/jit/IonCacheIRCompiler.cpp
+index c115e169282b..602376c5bf41 100644
+--- a/js/src/jit/IonCacheIRCompiler.cpp
++++ b/js/src/jit/IonCacheIRCompiler.cpp
+@@ -51,6 +51,7 @@ IonCacheIRCompiler::IonCacheIRCompiler(JSContext* cx, TempAllocator& alloc,
+       writer_(writer),
+       ic_(ic),
+       ionScript_(ionScript),
++      currentStub_(nullptr),
+       savedLiveRegs_(false),
+       localTracingSlots_(0),
+       perfSpewer_(ic->script(), ic->pc()) {
+@@ -80,6 +81,14 @@ void IonCacheIRCompiler::pushStubCodePointer() {
+   stubJitCodeOffset_.emplace(masm.PushWithPatch(ImmPtr((void*)-1)));
+ }
+ 
++void IonCacheIRCompiler::pushStubAndStubCodePointer() {
++  MOZ_ASSERT(currentStub_);
++  // REYNARD: Only IonICCallFrameLayout carries the active IonICStub*.
++  // OOL exit-frame layouts still expect a single JitCode* marker word.
++  masm.Push(ImmPtr(currentStub_));
++  pushStubCodePointer();
++}
++
+ // AutoSaveLiveRegisters must be used when we make a call that can GC. The
+ // constructor ensures all live registers are stored on the stack (where the GC
+ // expects them) and the destructor restores these registers.
+@@ -264,7 +273,7 @@ static void* GetReturnAddressToIonCode(JSContext* cx) {
+ void IonCacheIRCompiler::enterStubFrame(MacroAssembler& masm,
+                                         const AutoSaveLiveRegisters&) {
+   MOZ_ASSERT(!enteredStubFrame_);
+-  pushStubCodePointer();
++  pushStubAndStubCodePointer();
+   masm.Push(FrameDescriptor(FrameType::IonJS));
+   masm.Push(ImmPtr(GetReturnAddressToIonCode(cx_)));
+ 
+@@ -582,6 +591,7 @@ bool IonCacheIRCompiler::init() {
+ 
+ JitCode* IonCacheIRCompiler::compile(IonICStub* stub) {
+   AutoCreatedBy acb(masm, "IonCacheIRCompiler::compile");
++  currentStub_ = stub;
+ 
+   masm.setFramePushed(ionScript_->frameSize());
+   if (cx_->runtime()->geckoProfiler().enabled()) {

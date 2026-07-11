@@ -1,0 +1,13 @@
+diff --git a/widget/moz.build b/widget/moz.build
+index 813b1d5351b4..92d9572f0022 100644
+--- a/widget/moz.build
++++ b/widget/moz.build
+@@ -391,7 +391,7 @@ elif toolkit == "android":
+         "android/PlatformWidgetTypes.ipdlh",
+         "headless/HeadlessWidgetTypes.ipdlh",
+     ]
+-elif toolkit == "cocoa":
++elif toolkit in ("cocoa", "uikit"):
+     IPDL_SOURCES = [
+         "cocoa/PCompositorWidget.ipdl",
+         "cocoa/PlatformWidgetTypes.ipdlh",

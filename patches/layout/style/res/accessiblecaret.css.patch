@@ -1,0 +1,146 @@
+diff --git a/layout/style/res/accessiblecaret.css b/layout/style/res/accessiblecaret.css
+index 5ffab8c4e9e1..f56958afdee0 100644
+--- a/layout/style/res/accessiblecaret.css
++++ b/layout/style/res/accessiblecaret.css
+@@ -5,9 +5,13 @@
+ :host {
+   /* Add transition effect to make caret size changing smoother. */
+   transition-property: width, height, margin-left;
+-
+   position: absolute;
+   z-index: 2147483647;
++  overflow: visible;
++  --accessiblecaret-color: #0077e0;
++  --accessiblecaret-knob-size: 16px;
++  --accessiblecaret-hit-target-size: 28px;
++  --accessiblecaret-stem-width: 2px;
+ }
+ 
+ :host(.none) {
+@@ -18,79 +22,63 @@
+   visibility: hidden;
+ }
+ 
++:host(.hidden-for-native-selection) {
++  opacity: 0;
++}
++
++:host(.hidden-for-native-selection) > #image,
++:host(.hidden-for-native-selection) > #text-overlay {
++  width: 0 !important;
++  height: 0 !important;
++  margin: 0 !important;
++  padding: 0 !important;
++  opacity: 0;
++}
++
+ #image,
+ #text-overlay {
+-  width: 100%;
+-
+   /* Override this property in moz-custom-content-container to make dummy touch
+    * listener work. */
+   pointer-events: auto;
++}
+ 
+-  @media (-moz-platform: android) {
+-    /* border: 0.1px solid red; */ /* Uncomment border to see the touch target. */
+-    padding-left: 59%; /* Enlarge the touch area. ((48-22)/2)px / 22px ~= 59% */
+-    padding-right: 59%; /* Enlarge the touch area. */
+-    margin-left: -59%;
+-  }
+-
+-  :host(.left) > & {
+-    margin-left: -39%;
+-    @media (-moz-platform: android) {
+-      margin-left: -109%;
+-    }
+-  }
+-
+-  :host(.right) > & {
+-    margin-left: 41%;
+-    @media (-moz-platform: android) {
+-      margin-left: -12%;
+-    }
+-  }
++#text-overlay {
++  width: 100%;
++  position: relative;
++  background-image: linear-gradient(
++    var(--accessiblecaret-color),
++    var(--accessiblecaret-color)
++  );
++  background-repeat: no-repeat;
++  background-position: center;
++  background-size: var(--accessiblecaret-stem-width) 100%;
+ }
+ 
+ #image {
+-  background-position: center top;
+-  background-size: 100%;
++  position: absolute;
++  left: 50%;
++  width: var(--accessiblecaret-hit-target-size) !important;
++  height: var(--accessiblecaret-hit-target-size) !important;
++  transform: translateX(-50%);
++  background-image: radial-gradient(
++    circle,
++    var(--accessiblecaret-color) 0 62%,
++    transparent 63%
++  );
+   background-repeat: no-repeat;
+-  background-origin: content-box;
+-
+-  @media (-moz-platform: android) {
+-    padding-bottom: 59%; /* Enlarge the touch area. */
+-  }
+-
+-  :host(.normal) > & {
+-    background-image: image-set(
+-      url("resource://gre-resources/accessiblecaret-normal@1x.png"),
+-      url("resource://gre-resources/accessiblecaret-normal@1.5x.png") 1.5x,
+-      url("resource://gre-resources/accessiblecaret-normal@2x.png") 2x,
+-      url("resource://gre-resources/accessiblecaret-normal@2.25x.png") 2.25x
+-    );
+-    @media (-moz-platform: android) {
+-      background-image: url("resource://gre-resources/accessiblecaret-normal.svg");
+-    }
+-  }
++  background-size: var(--accessiblecaret-knob-size)
++    var(--accessiblecaret-knob-size);
++}
+ 
+-  :host(.left) > & {
+-    background-image: image-set(
+-      url("resource://gre-resources/accessiblecaret-tilt-left@1x.png"),
+-      url("resource://gre-resources/accessiblecaret-tilt-left@1.5x.png") 1.5x,
+-      url("resource://gre-resources/accessiblecaret-tilt-left@2x.png") 2x,
+-      url("resource://gre-resources/accessiblecaret-tilt-left@2.25x.png") 2.25x
+-    );
+-    @media (-moz-platform: android) {
+-      background-image: url("resource://gre-resources/accessiblecaret-tilt-left.svg");
+-    }
+-  }
++:host(.left) > #image {
++  background-position: center top;
++  top: calc(-1 * var(--accessiblecaret-knob-size) + 1px);
++}
+ 
+-  :host(.right) > & {
+-    background-image: image-set(
+-      url("resource://gre-resources/accessiblecaret-tilt-right@1x.png"),
+-      url("resource://gre-resources/accessiblecaret-tilt-right@1.5x.png") 1.5x,
+-      url("resource://gre-resources/accessiblecaret-tilt-right@2x.png") 2x,
+-      url("resource://gre-resources/accessiblecaret-tilt-right@2.25x.png") 2.25x
+-    );
+-    @media (-moz-platform: android) {
+-      background-image: url("resource://gre-resources/accessiblecaret-tilt-right.svg");
+-    }
+-  }
++:host(.normal) > #image,
++:host(.right) > #image {
++  background-position: center bottom;
++  top: calc(
++    100% - (var(--accessiblecaret-hit-target-size) - var(--accessiblecaret-knob-size)) - 1px
++  );
+ }

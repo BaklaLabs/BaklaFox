@@ -1,0 +1,22 @@
+diff --git a/dom/webgpu/ExternalTexture.cpp b/dom/webgpu/ExternalTexture.cpp
+index 80db56e41ea4..d69aa5ed82c6 100644
+--- a/dom/webgpu/ExternalTexture.cpp
++++ b/dom/webgpu/ExternalTexture.cpp
+@@ -29,7 +29,7 @@
+ #  include "mozilla/layers/GpuProcessD3D11TextureMap.h"
+ #  include "mozilla/layers/TextureD3D11.h"
+ #endif
+-#ifdef XP_MACOSX
++#if defined(XP_MACOSX) || defined(XP_IOS)
+ #  include "mozilla/gfx/MacIOSurface.h"
+ #  include "mozilla/layers/MacIOSurfaceTextureHostOGL.h"
+ #endif
+@@ -889,7 +889,7 @@ ExternalTextureSourceHost::CreateFromMacIOSurfaceTextureHost(
+     WebGPUParent* aParent, RawId aDeviceId,
+     const ExternalTextureSourceDescriptor& aDesc,
+     const layers::MacIOSurfaceTextureHostOGL* aTextureHost) {
+-#ifdef XP_MACOSX
++#if defined(XP_MACOSX) || defined(XP_IOS)
+   const RefPtr<MacIOSurface> ioSurface = aTextureHost->mSurface;
+   if (!ioSurface) {
+     gfxCriticalErrorOnce() << "Failed to lookup MacIOSurface";

@@ -1,0 +1,30 @@
+diff --git a/mobile/shared/actors/SelectionActionDelegateChild.sys.mjs b/mobile/shared/actors/SelectionActionDelegateChild.sys.mjs
+index f3569758ce71..4e433830c20b 100644
+--- a/mobile/shared/actors/SelectionActionDelegateChild.sys.mjs
++++ b/mobile/shared/actors/SelectionActionDelegateChild.sys.mjs
+@@ -2,6 +2,7 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ import { GeckoViewActorChild } from "resource://gre/modules/GeckoViewActorChild.sys.mjs";
+ 
+ const lazy = {};
+@@ -315,6 +316,17 @@ export class SelectionActionDelegateChild extends GeckoViewActorChild {
+ 
+     debug`handleEvent: ${reason}`;
+ 
++    if (AppConstants.platform == "ios" && aEvent.selectionEditable) {
++      if (this._isActive) {
++        this._isActive = false;
++        this._previousMessage = "";
++        this.sendAsyncMessage("HideSelectionAction", {
++          reason: "visibilitychange",
++        });
++      }
++      return;
++    }
++
+     if (this._magnifierEnabled) {
+       this._handleMagnifier(aEvent);
+     }

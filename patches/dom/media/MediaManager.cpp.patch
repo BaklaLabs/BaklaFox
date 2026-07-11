@@ -1,0 +1,86 @@
+diff --git a/dom/media/MediaManager.cpp b/dom/media/MediaManager.cpp
+index cc38a8f75072..6db1e63dc65a 100644
+--- a/dom/media/MediaManager.cpp
++++ b/dom/media/MediaManager.cpp
+@@ -991,7 +991,8 @@ NS_IMPL_ISUPPORTS(LocalMediaDevice, nsIMediaDevice)
+ MediaDevice::MediaDevice(MediaEngine* aEngine, MediaSourceEnum aMediaSource,
+                          const nsString& aRawName, const nsString& aRawID,
+                          const nsString& aRawGroupID, IsScary aIsScary,
+-                         const OsPromptable canRequestOsLevelPrompt)
++                         const OsPromptable canRequestOsLevelPrompt,
++                         Maybe<dom::VideoFacingModeEnum> aFacingMode)
+     : mEngine(aEngine),
+       mAudioDeviceInfo(nullptr),
+       mMediaSource(aMediaSource),
+@@ -1004,7 +1005,8 @@ MediaDevice::MediaDevice(MediaEngine* aEngine, MediaSourceEnum aMediaSource,
+       mType(NS_ConvertASCIItoUTF16(dom::GetEnumString(mKind))),
+       mRawID(aRawID),
+       mRawGroupID(aRawGroupID),
+-      mRawName(aRawName) {
++      mRawName(aRawName),
++      mFacingMode(aFacingMode) {
+   MOZ_ASSERT(mEngine);
+ }
+ 
+@@ -1025,16 +1027,17 @@ MediaDevice::MediaDevice(MediaEngine* aEngine,
+       mType(NS_ConvertASCIItoUTF16(dom::GetEnumString(mKind))),
+       mRawID(aRawID),
+       mRawGroupID(mAudioDeviceInfo->GroupID()),
+-      mRawName(mAudioDeviceInfo->Name()) {}
++      mRawName(mAudioDeviceInfo->Name()),
++      mFacingMode(Nothing()) {}
+ 
+ /* static */
+ RefPtr<MediaDevice> MediaDevice::CopyWithNewRawGroupId(
+     const RefPtr<MediaDevice>& aOther, const nsString& aRawGroupID) {
+   MOZ_ASSERT(!aOther->mAudioDeviceInfo, "device not supported");
+-  return new MediaDevice(aOther->mEngine, aOther->mMediaSource,
+-                         aOther->mRawName, aOther->mRawID, aRawGroupID,
+-                         IsScary(aOther->mScary),
+-                         OsPromptable(aOther->mCanRequestOsLevelPrompt));
++  return new MediaDevice(
++      aOther->mEngine, aOther->mMediaSource, aOther->mRawName, aOther->mRawID,
++      aRawGroupID, IsScary(aOther->mScary),
++      OsPromptable(aOther->mCanRequestOsLevelPrompt), aOther->mFacingMode);
+ }
+ 
+ MediaDevice::~MediaDevice() = default;
+@@ -2229,6 +2232,12 @@ MediaManager::MaybeRequestPermissionAndEnumerateRawDevices(
+       aParams.mFlags.contains(EnumerationFlag::EnumerateAudioOutputs);
+   const bool hasFakeCams = aParams.HasFakeCams();
+   const bool hasFakeMics = aParams.HasFakeMics();
++  const bool requestCamera =
++      hasVideo && !hasFakeCams &&
++      aParams.VideoInputType() == MediaSourceEnum::Camera;
++  const bool requestMicrophone =
++      hasAudio && !hasFakeMics &&
++      aParams.AudioInputType() == MediaSourceEnum::Microphone;
+   // True if at least one of video input or audio input is a real device
+   // or there is audio output.
+   const bool realDeviceRequested = (!hasFakeCams && hasVideo) ||
+@@ -2258,12 +2267,12 @@ MediaManager::MaybeRequestPermissionAndEnumerateRawDevices(
+         });
+     obs->NotifyObservers(static_cast<nsIRunnable*>(task),
+                          "getUserMedia:ask-device-permission", type);
+-  } else if (realDeviceRequested && hasVideo &&
+-             aParams.VideoInputType() == MediaSourceEnum::Camera) {
++  } else if (realDeviceRequested && (requestCamera || requestMicrophone)) {
+     ipc::PBackgroundChild* backgroundChild =
+         ipc::BackgroundChild::GetOrCreateForCurrentThread();
+     deviceAccessPromise = backgroundChild->SendRequestCameraAccess(
+-        aParams.mFlags.contains(EnumerationFlag::AllowPermissionRequest));
++        aParams.mFlags.contains(EnumerationFlag::AllowPermissionRequest),
++        requestCamera, requestMicrophone);
+   }
+ 
+   if (!deviceAccessPromise) {
+@@ -2275,7 +2284,8 @@ MediaManager::MaybeRequestPermissionAndEnumerateRawDevices(
+     // allowing a permission request does exactly what we need in this case.
+     ipc::PBackgroundChild* backgroundChild =
+         ipc::BackgroundChild::GetOrCreateForCurrentThread();
+-    deviceAccessPromise = backgroundChild->SendRequestCameraAccess(false);
++    deviceAccessPromise = backgroundChild->SendRequestCameraAccess(
++        false, requestCamera, requestMicrophone);
+   }
+ 
+   return deviceAccessPromise->Then(

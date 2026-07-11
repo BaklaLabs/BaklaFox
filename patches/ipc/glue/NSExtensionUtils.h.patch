@@ -1,0 +1,80 @@
+diff --git a/ipc/glue/NSExtensionUtils.h b/ipc/glue/NSExtensionUtils.h
+new file mode 100644
+index 000000000000..330a56fbb02b
+--- /dev/null
++++ b/ipc/glue/NSExtensionUtils.h
+@@ -0,0 +1,74 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#ifndef mozilla_ipc_NSExtensionUtils_h
++#define mozilla_ipc_NSExtensionUtils_h
++
++#include <functional>
++#include <xpc/xpc.h>
++#include "mozilla/DarwinObjectPtr.h"
++#include "mozilla/Result.h"
++#include "mozilla/ResultVariant.h"
++#include "mozilla/UniquePtr.h"
++#include "mozilla/ipc/LaunchError.h"
++
++namespace mozilla::ipc {
++
++class BEProcessCapabilityGrantDeleter {
++ public:
++  void operator()(void* _Nullable aGrant) const;
++};
++
++using UniqueBEProcessCapabilityGrant =
++    mozilla::UniquePtr<void, BEProcessCapabilityGrantDeleter>;
++
++class NSExtensionProcess {
++ public:
++  // Called to start the process. The `aCompletion` function may be executed on
++  // a background libdispatch thread.
++  static void StartProcess(
++      const std::function<void(Result<NSExtensionProcess, LaunchError>&&)>&
++          aCompletion);
++
++  // Make an xpc_connection_t to this process. If an error is encountered,
++  // `aError` will be populated with the error.
++  //
++  // Ownership over the newly created connection is returned to the caller.
++  // The connection is returned in a suspended state, and must be resumed.
++  DarwinObjectPtr<xpc_connection_t> MakeLibXPCConnection();
++
++  UniqueBEProcessCapabilityGrant GrantForegroundCapability();
++
++  // Invalidate the process, indicating that it should be cleaned up &
++  // destroyed.
++  void Invalidate();
++
++  // Explicit copy constructors
++  NSExtensionProcess(const NSExtensionProcess&);
++  NSExtensionProcess& operator=(const NSExtensionProcess&);
++
++  // Release the object when completed.
++  ~NSExtensionProcess();
++
++ private:
++  NSExtensionProcess(void* _Nullable aProcessObject)
++      : mProcessObject(aProcessObject) {}
++  void* _Nullable mProcessObject;
++};
++
++enum class NSExtensionSandboxRevision {
++  // RestrictedSandboxRevision.revision1
++  Revision1,
++};
++
++// Call `applyRestrictedSandbox` on the current NSExtension process, if it
++// supports the given sandbox revision.
++void LockdownNSExtensionProcess(NSExtensionSandboxRevision aRevision);
++
++}  // namespace mozilla::ipc
++
++#endif  // mozilla_ipc_NSExtensionUtils_h

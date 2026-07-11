@@ -1,0 +1,17 @@
+diff --git a/widget/InProcessCompositorWidget.cpp b/widget/InProcessCompositorWidget.cpp
+index 777157e17e0d..df62a736b918 100644
+--- a/widget/InProcessCompositorWidget.cpp
++++ b/widget/InProcessCompositorWidget.cpp
+@@ -16,7 +16,11 @@ namespace widget {
+ // macOS doesn't have a platform-specific in process compositor,
+ // so it uses this implementation to create a generic in process
+ // compositor, when requested.
+-#if !defined(MOZ_WIDGET_SUPPORTS_OOP_COMPOSITING) || defined(XP_MACOSX)
++
++// REYNARD: Keep the generic in-process compositor widget constructor available
++// on iOS as the fallback path when remote session creation fails.
++#if !defined(MOZ_WIDGET_SUPPORTS_OOP_COMPOSITING) || defined(XP_MACOSX) || \
++    defined(XP_IOS)
+ /* static */
+ RefPtr<CompositorWidget> CompositorWidget::CreateLocal(
+     const CompositorWidgetInitData& aInitData,

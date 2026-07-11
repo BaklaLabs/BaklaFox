@@ -1,0 +1,278 @@
+diff --git a/widget/uikit/TextInputHandler.mm b/widget/uikit/TextInputHandler.mm
+index e8f05ad59f6f..2c5e570238b0 100644
+--- a/widget/uikit/TextInputHandler.mm
++++ b/widget/uikit/TextInputHandler.mm
+@@ -2,6 +2,8 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
++#include <algorithm>
++
+ #include "TextInputHandler.h"
+ 
+ #import <UIKit/UIKit.h>
+@@ -10,7 +12,9 @@
+ #include "mozilla/Logging.h"
+ #include "mozilla/MacStringHelpers.h"
+ #include "mozilla/MiscEvents.h"
++#include "mozilla/RefPtr.h"
+ #include "mozilla/TextEventDispatcher.h"
++#include "mozilla/TextRange.h"
+ #include "mozilla/TextEvents.h"
+ #include "mozilla/WidgetUtils.h"
+ #include "nsIWidget.h"
+@@ -20,21 +24,112 @@
+ 
+ mozilla::LazyLogModule gIMELog("TextInputHandler");
+ 
++@interface ChildView : UIView
++
++@end
++
++@interface ChildView (TextInputNotifications)
++
++- (void)selectionGeometryChanged;
++
++@end
++
+ namespace mozilla::widget {
+ 
++static NSRange ClampCompositionSelectionRange(const NSRange& aSelectedRange,
++                                              NSUInteger aTextLength) {
++  const NSUInteger location = std::min(aSelectedRange.location, aTextLength);
++  const NSUInteger length =
++      std::min(aSelectedRange.length, aTextLength - location);
++  return NSMakeRange(location, length);
++}
++
++static already_AddRefed<TextRangeArray> CreateTextRangeArrayForMarkedText(
++    NSUInteger aTextLength, const NSRange& aSelectedRange) {
++  RefPtr<TextRangeArray> ranges = new TextRangeArray();
++  if (!aTextLength) {
++    return ranges.forget();
++  }
++
++  const NSRange selectedRange =
++      ClampCompositionSelectionRange(aSelectedRange, aTextLength);
++  const uint32_t selectedStart = static_cast<uint32_t>(selectedRange.location);
++  const uint32_t selectedEnd = static_cast<uint32_t>(NSMaxRange(selectedRange));
++  const uint32_t textLength = static_cast<uint32_t>(aTextLength);
++
++  if (selectedStart > 0) {
++    TextRange rawPrefix;
++    rawPrefix.mStartOffset = 0;
++    rawPrefix.mEndOffset = selectedStart;
++    rawPrefix.mRangeType = TextRangeType::eRawClause;
++    ranges->AppendElement(rawPrefix);
++  }
++
++  if (selectedEnd > selectedStart) {
++    TextRange selectedRawClause;
++    selectedRawClause.mStartOffset = selectedStart;
++    selectedRawClause.mEndOffset = selectedEnd;
++    selectedRawClause.mRangeType = TextRangeType::eSelectedRawClause;
++    ranges->AppendElement(selectedRawClause);
++  }
++
++  if (selectedEnd < textLength) {
++    TextRange rawSuffix;
++    rawSuffix.mStartOffset = selectedEnd;
++    rawSuffix.mEndOffset = textLength;
++    rawSuffix.mRangeType = TextRangeType::eRawClause;
++    ranges->AppendElement(rawSuffix);
++  }
++
++  TextRange caret;
++  caret.mStartOffset = selectedEnd;
++  caret.mEndOffset = selectedEnd;
++  caret.mRangeType = TextRangeType::eCaret;
++  ranges->AppendElement(caret);
++  return ranges.forget();
++}
++
+ NS_IMPL_ISUPPORTS(TextInputHandler, TextEventDispatcherListener,
+                   nsISupportsWeakReference)
+ 
+ TextInputHandler::TextInputHandler(nsWindow* aWidget)
+-    : mWidget(aWidget), mDispatcher(aWidget->GetTextEventDispatcher()) {}
++    : mWidget(aWidget),
++      mDispatcher(aWidget->GetTextEventDispatcher()),
++      mMarkedRange(NSMakeRange(NSNotFound, 0)) {}
+ 
+ nsresult TextInputHandler::NotifyIME(TextEventDispatcher* aTextEventDispatcher,
+                                      const IMENotification& aNotification) {
++  if (Destroyed() || aTextEventDispatcher != mDispatcher) {
++    return NS_OK;
++  }
++
++  switch (aNotification.mMessage) {
++    case REQUEST_TO_COMMIT_COMPOSITION:
++      UnmarkText();
++      break;
++    case REQUEST_TO_CANCEL_COMPOSITION:
++      CancelMarkedText();
++      break;
++    case NOTIFY_IME_OF_BLUR:
++      ClearCompositionState();
++      break;
++    case NOTIFY_IME_OF_POSITION_CHANGE: {
++      ChildView* view =
++          static_cast<ChildView*>(mWidget->GetNativeData(NS_NATIVE_WIDGET));
++      if (view) {
++        [view selectionGeometryChanged];
++      }
++      break;
++    }
++    default:
++      break;
++  }
++
+   return NS_OK;
+ }
+ 
+ IMENotificationRequests TextInputHandler::GetIMENotificationRequests() {
+-  return IMENotificationRequests{};
++  return IMENotificationRequests{IMENotificationRequest::PositionChange};
+ }
+ 
+ void TextInputHandler::OnRemovedFrom(
+@@ -45,6 +140,16 @@
+     WidgetKeyboardEvent& aKeyboardEvent, uint32_t aIndexOfKeypress,
+     void* aData) {}
+ 
++bool TextInputHandler::HasMarkedText() const {
++  return mMarkedRange.location != NSNotFound;
++}
++
++void TextInputHandler::ClearCompositionState() {
++  mMarkedRange = NSMakeRange(NSNotFound, 0);
++  mSelectedRangeOverride.reset();
++  mMarkedText.Truncate();
++}
++
+ bool TextInputHandler::InsertText(NSString* aText) {
+   nsString str;
+   CopyNSStringToXPCOMString(aText, str);
+@@ -57,6 +162,17 @@
+     return false;
+   }
+ 
++  if (HasMarkedText()) {
++    nsEventStatus status = nsEventStatus_eIgnore;
++    nsresult rv = mDispatcher->BeginNativeInputTransaction();
++    if (NS_FAILED(rv)) {
++      return false;
++    }
++    rv = mDispatcher->CommitComposition(status, &str, nullptr);
++    ClearCompositionState();
++    return NS_SUCCEEDED(rv) && !Destroyed();
++  }
++
+   if (str.Length() == 1) {
+     char16_t charCode = str[0];
+     if (charCode == 0x0a) {
+@@ -91,6 +207,93 @@
+   return true;
+ }
+ 
++bool TextInputHandler::SetMarkedText(NSString* aText,
++                                     const NSRange& aSelectedRange) {
++  if (Destroyed()) {
++    return false;
++  }
++
++  nsString text;
++  CopyNSStringToXPCOMString(aText ?: @"", text);
++  const NSRange selectedRange =
++      ClampCompositionSelectionRange(aSelectedRange, text.Length());
++  mMarkedText = text;
++
++  nsEventStatus status = nsEventStatus_eIgnore;
++  nsresult rv = mDispatcher->BeginNativeInputTransaction();
++  if (NS_FAILED(rv)) {
++    return false;
++  }
++
++  if (!HasMarkedText()) {
++    NSRange selection = NSMakeRange(NSNotFound, 0);
++    if (!SelectedRange(selection) || selection.location == NSNotFound) {
++      return false;
++    }
++
++    mMarkedRange = NSMakeRange(selection.location, 0);
++    mSelectedRangeOverride = Some(selection);
++    rv = mDispatcher->StartComposition(status, nullptr);
++    if (NS_FAILED(rv) || Destroyed()) {
++      ClearCompositionState();
++      return false;
++    }
++  }
++
++  mMarkedRange.length = text.Length();
++  mSelectedRangeOverride = Some(NSMakeRange(
++      mMarkedRange.location + selectedRange.location, selectedRange.length));
++
++  if (text.IsEmpty()) {
++    rv = mDispatcher->CommitComposition(status, &text, nullptr);
++    ClearCompositionState();
++    return NS_SUCCEEDED(rv) && !Destroyed();
++  }
++
++  RefPtr<TextRangeArray> ranges =
++      CreateTextRangeArrayForMarkedText(text.Length(), selectedRange);
++  rv = mDispatcher->SetPendingComposition(text, ranges);
++  if (NS_FAILED(rv)) {
++    return false;
++  }
++
++  rv = mDispatcher->FlushPendingComposition(status, nullptr);
++  return NS_SUCCEEDED(rv) && !Destroyed();
++}
++
++bool TextInputHandler::UnmarkText() {
++  if (Destroyed() || !HasMarkedText()) {
++    return false;
++  }
++
++  nsEventStatus status = nsEventStatus_eIgnore;
++  nsresult rv = mDispatcher->BeginNativeInputTransaction();
++  if (NS_FAILED(rv)) {
++    return false;
++  }
++
++  rv = mDispatcher->CommitComposition(status, nullptr, nullptr);
++  ClearCompositionState();
++  return NS_SUCCEEDED(rv) && !Destroyed();
++}
++
++bool TextInputHandler::CancelMarkedText() {
++  if (Destroyed() || !HasMarkedText()) {
++    return false;
++  }
++
++  nsString empty;
++  nsEventStatus status = nsEventStatus_eIgnore;
++  nsresult rv = mDispatcher->BeginNativeInputTransaction();
++  if (NS_FAILED(rv)) {
++    return false;
++  }
++
++  rv = mDispatcher->CommitComposition(status, &empty, nullptr);
++  ClearCompositionState();
++  return NS_SUCCEEDED(rv) && !Destroyed();
++}
++
+ bool TextInputHandler::HandleCommand(Command aCommand) {
+   MOZ_LOG(gIMELog, LogLevel::Info,
+           ("%p   TextInputHandler::HandleCommand, aCommand=%s", this,
+@@ -233,6 +436,9 @@ static void InitKeyEvent(WidgetKeyboardEvent& aEvent, uint32_t aKeyCode,
+   return true;
+ }
+ 
+-void TextInputHandler::OnDestroyed() { mWidget = nullptr; }
++void TextInputHandler::OnDestroyed() {
++  ClearCompositionState();
++  mWidget = nullptr;
++}
+ 
+ }  // namespace mozilla::widget

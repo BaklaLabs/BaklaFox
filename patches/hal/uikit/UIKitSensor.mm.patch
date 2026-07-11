@@ -1,0 +1,176 @@
+diff --git a/hal/uikit/UIKitSensor.mm b/hal/uikit/UIKitSensor.mm
+new file mode 100644
+index 000000000000..71d020cf693f
+--- /dev/null
++++ b/hal/uikit/UIKitSensor.mm
+@@ -0,0 +1,170 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#include "mozilla/Hal.h"
++#include "mozilla/HalSensor.h"
++
++#import <CoreMotion/CoreMotion.h>
++
++#include <cmath>
++
++using namespace mozilla::hal;
++
++namespace mozilla::hal_impl {
++
++static constexpr double kMeanGravity = 9.80665;
++static constexpr double kRadToDeg = 180.0 / M_PI;
++static constexpr NSTimeInterval kSensorUpdateInterval = 1.0 / 60.0;
++static constexpr CMAttitudeReferenceFrame kAttitudeReferenceFrame =
++    CMAttitudeReferenceFrameXMagneticNorthZVertical;
++
++static CMMotionManager* sMotionManager = nil;
++static bool sActiveSensors[NUM_SENSOR_TYPE];
++
++static bool IsCoreMotionSensor(SensorType aSensor) {
++  switch (aSensor) {
++    case SENSOR_ACCELERATION:
++    case SENSOR_LINEAR_ACCELERATION:
++    case SENSOR_GYROSCOPE:
++    case SENSOR_ROTATION_VECTOR:
++      return true;
++    default:
++      return false;
++  }
++}
++
++static bool HasActiveCoreMotionSensor() {
++  for (int i = 0; i < NUM_SENSOR_TYPE; i++) {
++    if (sActiveSensors[i] && IsCoreMotionSensor(static_cast<SensorType>(i))) {
++      return true;
++    }
++  }
++  return false;
++}
++
++static void NotifySensor(SensorType aSensor, const nsTArray<float>& aValues) {
++  hal::SensorData data(aSensor, PR_Now(), aValues);
++  hal::NotifySensorChange(data);
++}
++
++static void AppendAcceleration(nsTArray<float>& aValues,
++                               const CMAcceleration& aAcceleration) {
++  aValues.AppendElement(aAcceleration.x * kMeanGravity);
++  aValues.AppendElement(aAcceleration.y * kMeanGravity);
++  aValues.AppendElement(aAcceleration.z * kMeanGravity);
++}
++
++static void MotionUpdateHandler(CMDeviceMotion* aMotion, NSError* aError) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (aError || !aMotion) {
++    return;
++  }
++
++  if (sActiveSensors[SENSOR_ROTATION_VECTOR]) {
++    CMQuaternion quaternion = aMotion.attitude.quaternion;
++    AutoTArray<float, 4> values;
++    values.AppendElement(quaternion.x);
++    values.AppendElement(quaternion.y);
++    values.AppendElement(quaternion.z);
++    values.AppendElement(quaternion.w);
++    NotifySensor(SENSOR_ROTATION_VECTOR, values);
++  }
++
++  if (sActiveSensors[SENSOR_ACCELERATION]) {
++    CMAcceleration acceleration = aMotion.userAcceleration;
++    acceleration.x += aMotion.gravity.x;
++    acceleration.y += aMotion.gravity.y;
++    acceleration.z += aMotion.gravity.z;
++
++    AutoTArray<float, 3> values;
++    AppendAcceleration(values, acceleration);
++    NotifySensor(SENSOR_ACCELERATION, values);
++  }
++
++  if (sActiveSensors[SENSOR_LINEAR_ACCELERATION]) {
++    AutoTArray<float, 3> values;
++    AppendAcceleration(values, aMotion.userAcceleration);
++    NotifySensor(SENSOR_LINEAR_ACCELERATION, values);
++  }
++
++  if (sActiveSensors[SENSOR_GYROSCOPE]) {
++    CMRotationRate rotationRate = aMotion.rotationRate;
++    AutoTArray<float, 3> values;
++    values.AppendElement(rotationRate.x * kRadToDeg);
++    values.AppendElement(rotationRate.y * kRadToDeg);
++    values.AppendElement(rotationRate.z * kRadToDeg);
++    NotifySensor(SENSOR_GYROSCOPE, values);
++  }
++}
++
++static void StartMotionUpdates() {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (!sMotionManager) {
++    sMotionManager = [[CMMotionManager alloc] init];
++  }
++
++  if (sMotionManager.deviceMotionActive) {
++    return;
++  }
++
++  if (!sMotionManager.deviceMotionAvailable) {
++    return;
++  }
++
++  if (!([CMMotionManager availableAttitudeReferenceFrames] &
++        kAttitudeReferenceFrame)) {
++    return;
++  }
++
++  sMotionManager.deviceMotionUpdateInterval = kSensorUpdateInterval;
++  sMotionManager.showsDeviceMovementDisplay = YES;
++  [sMotionManager
++      startDeviceMotionUpdatesUsingReferenceFrame:kAttitudeReferenceFrame
++                                          toQueue:[NSOperationQueue mainQueue]
++                                      withHandler:^(CMDeviceMotion* motion,
++                                                    NSError* error) {
++                                        MotionUpdateHandler(motion, error);
++                                      }];
++}
++
++static void StopMotionUpdatesIfIdle() {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (HasActiveCoreMotionSensor() || !sMotionManager) {
++    return;
++  }
++
++  [sMotionManager stopDeviceMotionUpdates];
++  [sMotionManager release];
++  sMotionManager = nil;
++}
++
++void EnableSensorNotifications(SensorType aSensor) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (!IsCoreMotionSensor(aSensor)) {
++    return;
++  }
++
++  sActiveSensors[aSensor] = true;
++  StartMotionUpdates();
++}
++
++void DisableSensorNotifications(SensorType aSensor) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (!IsCoreMotionSensor(aSensor)) {
++    return;
++  }
++
++  sActiveSensors[aSensor] = false;
++  StopMotionUpdatesIfIdle();
++}
++
++}  // namespace mozilla::hal_impl

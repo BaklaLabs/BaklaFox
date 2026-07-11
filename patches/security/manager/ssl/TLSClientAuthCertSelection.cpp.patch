@@ -1,0 +1,18 @@
+diff --git a/security/manager/ssl/TLSClientAuthCertSelection.cpp b/security/manager/ssl/TLSClientAuthCertSelection.cpp
+index 50bb10e9417f..23126e41eee2 100644
+--- a/security/manager/ssl/TLSClientAuthCertSelection.cpp
++++ b/security/manager/ssl/TLSClientAuthCertSelection.cpp
+@@ -713,7 +713,12 @@ SelectClientAuthCertificate::Run() {
+     return NS_OK;
+   }
+ 
+-  // Not Auto => ask the user to select a certificate
++// TODO: Mirror Android
++#ifdef XP_IOS
++  DispatchContinuation(std::move(selectedCertBytes));
++  return NS_OK;
++#endif
++
+   nsTArray<RefPtr<nsIX509Cert>> certArray;
+   for (CERTCertListNode* node = CERT_LIST_HEAD(mPotentialClientCertificates);
+        !CERT_LIST_END(node, mPotentialClientCertificates);

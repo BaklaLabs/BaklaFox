@@ -1,0 +1,16 @@
+diff --git a/dom/media/platforms/apple/AppleDecoderModule.cpp b/dom/media/platforms/apple/AppleDecoderModule.cpp
+index 951deeb83e1c..3b5169c11fd4 100644
+--- a/dom/media/platforms/apple/AppleDecoderModule.cpp
++++ b/dom/media/platforms/apple/AppleDecoderModule.cpp
+@@ -109,8 +109,9 @@ DecodeSupportSet AppleDecoderModule::SupportsMimeType(
+     const nsACString& aMimeType, DecoderDoctorDiagnostics* aDiagnostics) const {
+   bool checkSupport =
+       aMimeType.EqualsLiteral("audio/mp4a-latm") ||
+-      MP4Decoder::IsH264(aMimeType) || VPXDecoder::IsVP9(aMimeType) ||
+-      AOMDecoder::IsAV1(aMimeType) || MP4Decoder::IsHEVC(aMimeType);
++      aMimeType.EqualsLiteral("audio/mpeg") || MP4Decoder::IsH264(aMimeType) ||
++      VPXDecoder::IsVP9(aMimeType) || AOMDecoder::IsAV1(aMimeType) ||
++      MP4Decoder::IsHEVC(aMimeType);
+   DecodeSupportSet supportType{};
+ 
+   if (checkSupport) {

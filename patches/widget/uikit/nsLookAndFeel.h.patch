@@ -1,0 +1,22 @@
+diff --git a/widget/uikit/nsLookAndFeel.h b/widget/uikit/nsLookAndFeel.h
+index 79eaa500b9cb..49c40effe654 100644
+--- a/widget/uikit/nsLookAndFeel.h
++++ b/widget/uikit/nsLookAndFeel.h
+@@ -12,6 +12,8 @@ class nsLookAndFeel final : public nsXPLookAndFeel {
+   nsLookAndFeel();
+   virtual ~nsLookAndFeel();
+ 
++  static void SetSystemUsesDarkTheme(bool aUseDarkTheme);
++
+   void NativeInit() final;
+   void RefreshImpl() override;
+   nsresult NativeGetInt(IntID aID, int32_t& aResult) override;
+@@ -27,8 +29,6 @@ class nsLookAndFeel final : public nsXPLookAndFeel {
+   static bool UseOverlayScrollbars() { return true; }
+ 
+  private:
+-  nscolor mColorDarkText;
+-
+   bool mInitialized;
+ 
+   void EnsureInit();

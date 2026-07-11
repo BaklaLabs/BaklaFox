@@ -1,0 +1,22 @@
+diff --git a/gfx/layers/opengl/TextureHostOGL.cpp b/gfx/layers/opengl/TextureHostOGL.cpp
+index a1e17c74ac06..04d06bd970aa 100644
+--- a/gfx/layers/opengl/TextureHostOGL.cpp
++++ b/gfx/layers/opengl/TextureHostOGL.cpp
+@@ -21,7 +21,7 @@
+ #include "GfxTexturesReporter.h"  // for GfxTexturesReporter
+ #include "GeckoProfiler.h"
+ 
+-#ifdef XP_MACOSX
++#if defined(XP_MACOSX) || defined(XP_IOS)
+ #  include "mozilla/layers/MacIOSurfaceTextureHostOGL.h"
+ #endif
+ 
+@@ -103,7 +103,7 @@ already_AddRefed<TextureHost> CreateTextureHostOGL(
+     }
+ #endif
+ 
+-#ifdef XP_MACOSX
++#if defined(XP_MACOSX) || defined(XP_IOS)
+     case SurfaceDescriptor::TSurfaceDescriptorMacIOSurface: {
+       const SurfaceDescriptorMacIOSurface& desc =
+           aDesc.get_SurfaceDescriptorMacIOSurface();

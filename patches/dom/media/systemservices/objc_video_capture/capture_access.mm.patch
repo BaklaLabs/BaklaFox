@@ -1,0 +1,173 @@
+diff --git a/dom/media/systemservices/objc_video_capture/capture_access.mm b/dom/media/systemservices/objc_video_capture/capture_access.mm
+new file mode 100644
+index 000000000000..9fa548821181
+--- /dev/null
++++ b/dom/media/systemservices/objc_video_capture/capture_access.mm
+@@ -0,0 +1,167 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
++ * You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* This source code is introduced during the work of an iOS 13+ browser
++ * https://github.com/minh-ton/reynard-browser in Feb 2026. */
++
++#include "capture_access.h"
++
++#import <AVFoundation/AVFoundation.h>
++
++#include "mozilla/Assertions.h"
++#include "nsString.h"
++#include "nsThreadUtils.h"
++
++using mozilla::camera::CamerasAccessStatus;
++using mozilla::camera::CaptureAccessPromise;
++
++@interface CaptureAccessRequest : NSObject {
++ @private
++  mozilla::MozPromiseHolder<CaptureAccessPromise> _holder;
++  bool _requestCamera;
++  bool _requestMicrophone;
++}
++
++- (instancetype)initWithCamera:(bool)aRequestCamera
++                    microphone:(bool)aRequestMicrophone;
++- (void)finishWithStatus:(CamerasAccessStatus)aStatus;
++- (void)requestMediaType:(AVMediaType)aMediaType
++               onGranted:(dispatch_block_t)aOnGranted;
++- (void)requestMicrophoneIfNeeded;
++- (void)requestCameraIfNeeded;
++- (RefPtr<CaptureAccessPromise>)start;
++
++@end
++
++@implementation CaptureAccessRequest
++
++- (instancetype)initWithCamera:(bool)aRequestCamera
++                    microphone:(bool)aRequestMicrophone {
++  self = [super init];
++  if (self) {
++    _requestCamera = aRequestCamera;
++    _requestMicrophone = aRequestMicrophone;
++  }
++  return self;
++}
++
++- (void)finishWithStatus:(CamerasAccessStatus)aStatus {
++  _holder.Resolve(aStatus, __func__);
++}
++
++- (void)requestMediaType:(AVMediaType)aMediaType
++               onGranted:(dispatch_block_t)aOnGranted {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  AVAuthorizationStatus status =
++      [AVCaptureDevice authorizationStatusForMediaType:aMediaType];
++
++  if (status == AVAuthorizationStatusAuthorized) {
++    aOnGranted();
++    return;
++  }
++
++  if (status == AVAuthorizationStatusNotDetermined) {
++    [AVCaptureDevice
++        requestAccessForMediaType:aMediaType
++                completionHandler:^(BOOL granted) {
++                  dispatch_async(dispatch_get_main_queue(), ^{
++                    if (granted) {
++                      aOnGranted();
++                    } else {
++                      [self finishWithStatus:CamerasAccessStatus::Rejected];
++                    }
++                  });
++                }];
++    return;
++  }
++
++  if (status == AVAuthorizationStatusDenied ||
++      status == AVAuthorizationStatusRestricted) {
++    [self finishWithStatus:CamerasAccessStatus::Rejected];
++    return;
++  }
++
++  [self finishWithStatus:CamerasAccessStatus::Error];
++}
++
++- (void)requestMicrophoneIfNeeded {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (!_requestMicrophone) {
++    [self finishWithStatus:CamerasAccessStatus::Granted];
++    return;
++  }
++
++  [self requestMediaType:AVMediaTypeAudio
++               onGranted:^{
++                 [self finishWithStatus:CamerasAccessStatus::Granted];
++               }];
++}
++
++- (void)requestCameraIfNeeded {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (!_requestCamera) {
++    [self requestMicrophoneIfNeeded];
++    return;
++  }
++
++  [self requestMediaType:AVMediaTypeVideo
++               onGranted:^{
++                 [self requestMicrophoneIfNeeded];
++               }];
++}
++
++- (RefPtr<CaptureAccessPromise>)start {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  RefPtr<CaptureAccessPromise> promise = _holder.Ensure(__func__);
++  [self requestCameraIfNeeded];
++  return promise;
++}
++
++@end
++
++RefPtr<CaptureAccessPromise> mozilla::camera::RequestAVCaptureAccess(
++    bool aRequestCamera, bool aRequestMicrophone) {
++  if (!aRequestCamera && !aRequestMicrophone) {
++    return CaptureAccessPromise::CreateAndResolve(CamerasAccessStatus::Granted,
++                                                  __func__);
++  }
++
++  if (!NS_IsMainThread()) {
++    return InvokeAsync(GetMainThreadSerialEventTarget(), __func__,
++                       [aRequestCamera, aRequestMicrophone]() {
++                         return RequestAVCaptureAccess(aRequestCamera,
++                                                       aRequestMicrophone);
++                       });
++  }
++
++  CaptureAccessRequest* request =
++      [[CaptureAccessRequest alloc] initWithCamera:aRequestCamera
++                                        microphone:aRequestMicrophone];
++  return [request start];
++}
++
++mozilla::camera::CaptureDeviceFacingMode
++mozilla::camera::GetAVCaptureDeviceFacingMode(const nsACString& aUniqueId) {
++  NSString* uniqueId =
++      [NSString stringWithUTF8String:PromiseFlatCString(aUniqueId).get()];
++  for (AVCaptureDevice* device in
++       [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo]) {
++    if (![device.uniqueID isEqualToString:uniqueId]) {
++      continue;
++    }
++    switch (device.position) {
++      case AVCaptureDevicePositionFront:
++        return CaptureDeviceFacingMode::User;
++      case AVCaptureDevicePositionBack:
++        return CaptureDeviceFacingMode::Environment;
++      case AVCaptureDevicePositionUnspecified:
++        return CaptureDeviceFacingMode::None;
++    }
++  }
++  return CaptureDeviceFacingMode::None;
++}

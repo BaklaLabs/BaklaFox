@@ -1,0 +1,48 @@
+diff --git a/gfx/thebes/gfxCoreTextShaper.cpp b/gfx/thebes/gfxCoreTextShaper.cpp
+index 07ff05d9f14b..a3c2367e4322 100644
+--- a/gfx/thebes/gfxCoreTextShaper.cpp
++++ b/gfx/thebes/gfxCoreTextShaper.cpp
+@@ -632,8 +632,41 @@ CTFontRef gfxCoreTextShaper::CreateCTFontWithFeatures(
+   const gfxFontEntry* fe = mFont->GetFontEntry();
+   bool isInstalledFont = !fe->IsUserFont() || fe->IsLocalUserFont();
+   CGFontRef cgFont = static_cast<gfxMacFont*>(mFont)->GetCGFontRef();
+-  return CreateCTFontFromCGFontWithVariations(cgFont, aSize, isInstalledFont,
+-                                              aDescriptor);
++  // REYNARD: Merge feature attributes onto the preserved base descriptor so
++  // shaping keeps the Apple system-font descriptor instead of rebuilding from
++  // CGFont alone.
++  auto* unscaledFont =
++      static_cast<UnscaledFontMac*>(mFont->GetUnscaledFont().get());
++  CTFontDescriptorRef baseDescriptor =
++      unscaledFont ? unscaledFont->GetFontDescriptorRef() : nullptr;
++
++  CTFontDescriptorRef mergedDescriptor =
++      baseDescriptor
++          ? static_cast<CTFontDescriptorRef>(CFRetain(baseDescriptor))
++          : nullptr;
++  if (aDescriptor) {
++    if (baseDescriptor) {
++      CFDictionaryRef attrs = CTFontDescriptorCopyAttributes(aDescriptor);
++      if (attrs) {
++        if (mergedDescriptor) {
++          CFRelease(mergedDescriptor);
++        }
++        mergedDescriptor =
++            CTFontDescriptorCreateCopyWithAttributes(baseDescriptor, attrs);
++        CFRelease(attrs);
++      }
++    } else {
++      mergedDescriptor =
++          static_cast<CTFontDescriptorRef>(CFRetain(aDescriptor));
++    }
++  }
++
++  CTFontRef font = CreateCTFontFromCGFontWithVariations(
++      cgFont, aSize, isInstalledFont, mergedDescriptor);
++  if (mergedDescriptor) {
++    CFRelease(mergedDescriptor);
++  }
++  return font;
+ }
+ 
+ void gfxCoreTextShaper::Shutdown()  // [static]

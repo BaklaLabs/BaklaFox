@@ -1,0 +1,115 @@
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64.cpp b/js/src/jit/arm64/MacroAssembler-arm64.cpp
+index 8188ba444345..4a2a2867775d 100644
+--- a/js/src/jit/arm64/MacroAssembler-arm64.cpp
++++ b/js/src/jit/arm64/MacroAssembler-arm64.cpp
+@@ -8,11 +8,13 @@
+ #include "mozilla/Maybe.h"
+ 
+ #include <bit>
++#include <libkern/OSCacheControl.h>
+ 
+ #include "jit/arm64/MoveEmitter-arm64.h"
+ #include "jit/arm64/SharedICRegisters-arm64.h"
+ #include "jit/Bailouts.h"
+ #include "jit/BaselineFrame.h"
++#include "jit/FlushICache.h"
+ #include "jit/JitRuntime.h"
+ #include "jit/MacroAssembler.h"
+ #include "jit/ProcessExecutableMemory.h"
+@@ -22,6 +24,7 @@
+ #include "vm/JitActivation.h"  // js::jit::JitActivation
+ #include "vm/JSContext.h"
+ #include "vm/StringType.h"
++
+ #include "wasm/WasmStubs.h"
+ 
+ #include "jit/MacroAssembler-inl.h"
+@@ -29,6 +32,11 @@
+ namespace js {
+ namespace jit {
+ 
++static void FinalizeExecutablePatch(void* address, size_t size) {
++  FlushICache(address, size);
++  sys_cache_control(kCacheFunctionPrepareForExecution, address, size);
++}
++
+ enum class Width { _32 = 32, _64 = 64 };
+ 
+ static inline ARMRegister X(Register r) { return ARMRegister(r, 64); }
+@@ -1726,18 +1734,24 @@ void MacroAssembler::patchFarJump(CodeOffset farJump, uint32_t targetOffset) {
+ }
+ 
+ void MacroAssembler::patchFarJump(uint8_t* farJump, uint8_t* target) {
+-  Instruction* inst1 = (Instruction*)(farJump + 4);
+-  Instruction* inst2 = (Instruction*)(farJump + 8);
++  Instruction* executableInst1 = (Instruction*)(farJump + 4);
++  Instruction* executableInst2 = (Instruction*)(farJump + 8);
++  Instruction* inst1 = WritableJitAllocationFromExecutable(executableInst1);
++  Instruction* inst2 = WritableJitAllocationFromExecutable(executableInst2);
+ 
+   int64_t distance = (int64_t)target - (int64_t)farJump;
+   MOZ_RELEASE_ASSERT(mozilla::Abs(distance) <=
+                      (intptr_t)jit::MaxCodeBytesPerProcess);
+ 
+-  MOZ_ASSERT(inst1->InstructionBits() == UINT32_MAX);
+-  MOZ_ASSERT(inst2->InstructionBits() == UINT32_MAX);
++  MOZ_ASSERT(executableInst1->InstructionBits() == UINT32_MAX);
++  MOZ_ASSERT(executableInst2->InstructionBits() == UINT32_MAX);
+ 
+   inst1->SetInstructionBits((uint32_t)distance);
+   inst2->SetInstructionBits((uint32_t)(distance >> 32));
++
++  // REYNARD: Far-jump literals are patched at runtime for wasm tiering.
++  // Commit the writable-alias updates back to the executable view on iOS.
++  FinalizeExecutablePatch(executableInst1, 2 * vixl::kInstructionSize);
+ }
+ 
+ CodeOffset MacroAssembler::nopPatchableToCall() {
+@@ -1749,16 +1763,22 @@ CodeOffset MacroAssembler::nopPatchableToCall() {
+ 
+ void MacroAssembler::patchNopToCall(uint8_t* call, uint8_t* target) {
+   uint8_t* inst = call - 4;
+-  Instruction* instr = reinterpret_cast<Instruction*>(inst);
+-  MOZ_ASSERT(instr->IsBL() || instr->IsNOP());
+-  bl(instr, (target - inst) >> 2);
++  Instruction* executableInstr = reinterpret_cast<Instruction*>(inst);
++  Instruction* writableInstr =
++      WritableJitAllocationFromExecutable(executableInstr);
++  MOZ_ASSERT(executableInstr->IsBL() || executableInstr->IsNOP());
++  bl(writableInstr, (target - inst) >> 2);
++  FinalizeExecutablePatch(executableInstr, vixl::kInstructionSize);
+ }
+ 
+ void MacroAssembler::patchCallToNop(uint8_t* call) {
+   uint8_t* inst = call - 4;
+-  Instruction* instr = reinterpret_cast<Instruction*>(inst);
+-  MOZ_ASSERT(instr->IsBL() || instr->IsNOP());
+-  nop(instr);
++  Instruction* executableInstr = reinterpret_cast<Instruction*>(inst);
++  Instruction* writableInstr =
++      WritableJitAllocationFromExecutable(executableInstr);
++  MOZ_ASSERT(executableInstr->IsBL() || executableInstr->IsNOP());
++  nop(writableInstr);
++  FinalizeExecutablePatch(executableInstr, vixl::kInstructionSize);
+ }
+ 
+ CodeOffset MacroAssembler::move32WithPatch(Register dest) {
+@@ -3326,11 +3346,15 @@ void MacroAssembler::patchNearAddressMove(CodeLocationLabel loc,
+   ptrdiff_t off = target - loc;
+   MOZ_RELEASE_ASSERT(vixl::IsInt21(off));
+ 
+-  Instruction* cur = reinterpret_cast<Instruction*>(loc.raw());
+-  MOZ_ASSERT(cur->IsADR());
++  Instruction* executable = reinterpret_cast<Instruction*>(loc.raw());
++  Instruction* cur = WritableJitAllocationFromExecutable(executable);
++  MOZ_ASSERT(executable->IsADR());
+ 
+-  vixl::Register rd = vixl::XRegister(cur->Rd());
++  vixl::Register rd = vixl::XRegister(executable->Rd());
+   adr(cur, rd, off);
++
++  // REYNARD: This runtime ADR rewrite must be made visible to the RX alias on iOS.
++  FinalizeExecutablePatch(executable, vixl::kInstructionSize);
+ }
+ 
+ // ========================================================================

@@ -1,0 +1,219 @@
+diff --git a/widget/uikit/nsLookAndFeel.mm b/widget/uikit/nsLookAndFeel.mm
+index e5198c6f3fac..8b0629a9b930 100644
+--- a/widget/uikit/nsLookAndFeel.mm
++++ b/widget/uikit/nsLookAndFeel.mm
+@@ -4,20 +4,58 @@
+ 
+ #import <UIKit/UIColor.h>
+ #import <UIKit/UIInterface.h>
++#import <UIKit/UIScreen.h>
+ 
++#include "mozilla/LookAndFeel.h"
++#include "mozilla/widget/ThemeChangeKind.h"
+ #include "nsLookAndFeel.h"
+ 
+ #include "mozilla/FontPropertyTypes.h"
++#include "gfxPlatformMac.h"
+ #include "nsStyleConsts.h"
+ #include "gfxFont.h"
+ #include "gfxFontConstants.h"
+ 
+ using namespace mozilla;
+ 
++static bool sSystemUsesDarkTheme;
++static bool sSystemUsesDarkThemeInitialized;
++
++static bool GetSystemUsesDarkTheme() {
++  if (!sSystemUsesDarkThemeInitialized) {
++    sSystemUsesDarkThemeInitialized = true;
++    sSystemUsesDarkTheme =
++        [UIScreen mainScreen].traitCollection.userInterfaceStyle ==
++        UIUserInterfaceStyleDark;
++  }
++  return sSystemUsesDarkTheme;
++}
++
++static UITraitCollection* TraitCollectionForScheme(ColorScheme aColorScheme) {
++  const auto style = aColorScheme == ColorScheme::Dark
++                         ? UIUserInterfaceStyleDark
++                         : UIUserInterfaceStyleLight;
++  return [UITraitCollection traitCollectionWithUserInterfaceStyle:style];
++}
++
+ nsLookAndFeel::nsLookAndFeel() : mInitialized(false) {}
+ 
+ nsLookAndFeel::~nsLookAndFeel() {}
+ 
++void nsLookAndFeel::SetSystemUsesDarkTheme(bool aUseDarkTheme) {
++  if (sSystemUsesDarkThemeInitialized &&
++      sSystemUsesDarkTheme == aUseDarkTheme) {
++    return;
++  }
++
++  sSystemUsesDarkThemeInitialized = true;
++  sSystemUsesDarkTheme = aUseDarkTheme;
++
++  // REYNARD: Recompute cached UIKit look-and-feel values when the host view's
++  // trait collection changes so Gecko can follow the current interface style.
++  LookAndFeel::NotifyChangedAllWindows(widget::ThemeChangeKind::StyleAndLayout);
++}
++
+ static nscolor GetColorFromUIColor(UIColor* aColor) {
+   CGColorRef cgColor = [aColor CGColor];
+   CGColorSpaceModel model = CGColorSpaceGetModel(CGColorGetColorSpace(cgColor));
+@@ -34,6 +72,11 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+   return 0;
+ }
+ 
++static nscolor GetResolvedColor(UIColor* aColor, ColorScheme aColorScheme) {
++  return GetColorFromUIColor([aColor
++      resolvedColorWithTraitCollection:TraitCollectionForScheme(aColorScheme)]);
++}
++
+ void nsLookAndFeel::NativeInit() { EnsureInit(); }
+ 
+ void nsLookAndFeel::RefreshImpl() {
+@@ -49,9 +92,13 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+   nsresult res = NS_OK;
+ 
+   switch (aID) {
+-    case ColorID::Highlight:
+-      aResult = NS_RGB(0xaa, 0xaa, 0xaa);
++    case ColorID::Highlight: {
++      nscolor accent =
++          GetStandinForNativeColor(ColorID::Accentcolor, aColorScheme);
++      aResult =
++          NS_RGBA(NS_GET_R(accent), NS_GET_G(accent), NS_GET_B(accent), 78);
+       break;
++    }
+     case ColorID::MozMenuhover:
+       aResult = NS_RGB(0xee, 0xee, 0xee);
+       break;
+@@ -92,7 +139,7 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+     case ColorID::Menutext:
+     case ColorID::Infotext:
+     case ColorID::Windowtext:
+-      aResult = mColorDarkText;
++      aResult = GetResolvedColor([UIColor labelColor], aColorScheme);
+       break;
+     case ColorID::Activecaption:
+       aResult = NS_RGB(0xff, 0xff, 0xff);
+@@ -101,14 +148,15 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+       aResult = NS_RGB(0x00, 0x00, 0x00);
+       break;
+     case ColorID::Appworkspace:
+-      aResult = NS_RGB(0xFF, 0xFF, 0xFF);
++      aResult = GetResolvedColor([UIColor systemBackgroundColor], aColorScheme);
+       break;
+     case ColorID::Background:
+       aResult = NS_RGB(0x63, 0x63, 0xCE);
+       break;
+     case ColorID::Buttonface:
+     case ColorID::MozButtonhoverface:
+-      aResult = NS_RGB(0xF0, 0xF0, 0xF0);
++      aResult = GetResolvedColor([UIColor secondarySystemBackgroundColor],
++                                 aColorScheme);
+       break;
+     case ColorID::Buttonhighlight:
+       aResult = NS_RGB(0xFF, 0xFF, 0xFF);
+@@ -117,7 +165,7 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+       aResult = NS_RGB(0xDC, 0xDC, 0xDC);
+       break;
+     case ColorID::Graytext:
+-      aResult = NS_RGB(0x44, 0x44, 0x44);
++      aResult = GetResolvedColor([UIColor secondaryLabelColor], aColorScheme);
+       break;
+     case ColorID::Inactiveborder:
+       aResult = NS_RGB(0xff, 0xff, 0xff);
+@@ -147,7 +195,7 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+       aResult = NS_RGB(0xDA, 0xDA, 0xDA);
+       break;
+     case ColorID::Menu:
+-      aResult = NS_RGB(0xff, 0xff, 0xff);
++      aResult = GetResolvedColor([UIColor systemBackgroundColor], aColorScheme);
+       break;
+     case ColorID::Infobackground:
+       aResult = NS_RGB(0xFF, 0xFF, 0xC7);
+@@ -158,21 +206,22 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+     case ColorID::Window:
+     case ColorID::Field:
+     case ColorID::MozCombobox:
+-      aResult = NS_RGB(0xff, 0xff, 0xff);
++      aResult = GetResolvedColor([UIColor systemBackgroundColor], aColorScheme);
+       break;
+     case ColorID::Fieldtext:
+     case ColorID::MozComboboxtext:
+-      aResult = mColorDarkText;
++      aResult = GetResolvedColor([UIColor labelColor], aColorScheme);
+       break;
+     case ColorID::MozDialog:
+-      aResult = NS_RGB(0xaa, 0xaa, 0xaa);
++      aResult = GetResolvedColor([UIColor secondarySystemBackgroundColor],
++                                 aColorScheme);
+       break;
+     case ColorID::MozDialogtext:
+     case ColorID::MozCellhighlighttext:
+     case ColorID::Selecteditemtext:
+     case ColorID::MozColheadertext:
+     case ColorID::MozColheaderhovertext:
+-      aResult = mColorDarkText;
++      aResult = GetResolvedColor([UIColor labelColor], aColorScheme);
+       break;
+     case ColorID::MozMacFocusring:
+       aResult = NS_RGB(0x3F, 0x98, 0xDD);
+@@ -293,6 +342,9 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+     case IntID::SpellCheckerUnderlineStyle:
+       aResult = static_cast<int32_t>(StyleTextDecorationStyle::Dotted);
+       break;
++    case IntID::TouchDeviceSupportPresent:
++      aResult = 1;
++      break;
+     case IntID::ContextMenuOffsetVertical:
+     case IntID::ContextMenuOffsetHorizontal:
+       aResult = 2;
+@@ -301,6 +353,11 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+       aResult = 0;
+       res = NS_ERROR_FAILURE;
+   }
++
++  if (aID == IntID::SystemUsesDarkTheme) {
++    aResult = GetSystemUsesDarkTheme() ? 1 : 0;
++    return NS_OK;
++  }
+   return res;
+ }
+ 
+@@ -325,20 +382,10 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+ 
+ bool nsLookAndFeel::NativeGetFont(FontID aID, nsString& aFontName,
+                                   gfxFontStyle& aFontStyle) {
+-  // hack for now
+-  if (aID == FontID::Caption || aID == FontID::Menu) {
+-    aFontStyle.style = FontSlantStyle::NORMAL;
+-    aFontStyle.weight = FontWeight::NORMAL;
+-    aFontStyle.stretch = FontStretch::NORMAL;
+-    aFontStyle.size = 14;
+-    aFontStyle.systemFont = true;
+-
+-    aFontName.AssignLiteral("sans-serif");
+-    return true;
+-  }
+-
+-  // TODO: implement more here?
+-  return false;
++  nsAutoCString name;
++  gfxPlatformMac::LookupSystemFont(aID, name, aFontStyle);
++  aFontName.Assign(NS_ConvertUTF8toUTF16(name));
++  return true;
+ }
+ 
+ void nsLookAndFeel::EnsureInit() {
+@@ -347,7 +394,7 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+   }
+   mInitialized = true;
+ 
+-  mColorDarkText = GetColorFromUIColor([UIColor darkTextColor]);
++  GetSystemUsesDarkTheme();
+ 
+   RecordTelemetry();
+ }

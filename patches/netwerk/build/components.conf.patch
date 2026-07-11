@@ -1,0 +1,17 @@
+diff --git a/netwerk/build/components.conf b/netwerk/build/components.conf
+index 9c6bc65494eb..a24c84661e96 100644
+--- a/netwerk/build/components.conf
++++ b/netwerk/build/components.conf
+@@ -871,6 +871,12 @@ elif toolkit == 'android':
+         'headers': ['/netwerk/system/android/nsAndroidNetworkLinkService.h'],
+         'init_method': 'Init',
+     }
++elif toolkit == 'uikit':
++    link_service = {
++        'type': 'nsIOSNetworkLinkService',
++        'headers': ['/netwerk/system/ios/nsIOSNetworkLinkService.h'],
++        'init_method': 'Init',
++    }
+ elif buildconfig.substs['OS_ARCH'] == 'Linux':
+     link_service = {
+         'type': 'nsNetworkLinkService',

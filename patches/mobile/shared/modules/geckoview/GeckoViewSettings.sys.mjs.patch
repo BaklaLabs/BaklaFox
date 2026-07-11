@@ -1,0 +1,27 @@
+diff --git a/mobile/shared/modules/geckoview/GeckoViewSettings.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewSettings.sys.mjs
+index 8fb59f0a7f72..1741f2e66e69 100644
+--- a/mobile/shared/modules/geckoview/GeckoViewSettings.sys.mjs
++++ b/mobile/shared/modules/geckoview/GeckoViewSettings.sys.mjs
+@@ -83,6 +83,7 @@ export class GeckoViewSettings extends GeckoViewModule {
+     this.suspendMediaWhenInactive = settings.suspendMediaWhenInactive;
+     this.allowJavascript = settings.allowJavascript;
+     this.viewportMode = settings.viewportMode;
++    this.pageZoom = settings.pageZoom;
+     this.useTrackingProtection = !!settings.useTrackingProtection;
+ 
+     if (settings.isExtensionPopup) {
+@@ -135,6 +136,14 @@ export class GeckoViewSettings extends GeckoViewModule {
+       aViewportMode == VIEWPORT_MODE_DESKTOP;
+   }
+ 
++  set pageZoom(aPageZoom) {
++    if (typeof aPageZoom != "number" || aPageZoom <= 0) {
++      return;
++    }
++
++    this.browsingContext.fullZoom = aPageZoom;
++  }
++
+   get userAgentMode() {
+     return this._userAgentMode;
+   }

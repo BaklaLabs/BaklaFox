@@ -1,0 +1,28 @@
+diff --git a/netwerk/protocol/http/HttpConnectionMgrParent.h b/netwerk/protocol/http/HttpConnectionMgrParent.h
+index 63b67dfcdd8a..76134b58973b 100644
+--- a/netwerk/protocol/http/HttpConnectionMgrParent.h
++++ b/netwerk/protocol/http/HttpConnectionMgrParent.h
+@@ -6,9 +6,12 @@
+ #define HttpConnectionMgrParent_h_
+ 
+ #include "HttpConnectionMgrShell.h"
++#include "mozilla/ipc/PBackgroundSharedTypes.h"
+ #include "mozilla/net/PHttpConnectionMgrParent.h"
+ #include "mozilla/StaticMutex.h"
+ 
++class nsIWebTransportHash;
++
+ namespace mozilla::net {
+ 
+ // HttpConnectionMgrParent plays the role of nsHttpConnectionMgr and delegates
+@@ -21,6 +24,10 @@ class HttpConnectionMgrParent final : public PHttpConnectionMgrParent,
+ 
+   explicit HttpConnectionMgrParent() = default;
+ 
++  [[nodiscard]] nsresult StoreServerCertHashes(
++      nsHttpConnectionInfo* aConnInfo, bool aNoSpdy, bool aNoHttp3,
++      nsTArray<RefPtr<nsIWebTransportHash>>&& aServerCertHashes);
++
+   static uint32_t AddHttpUpgradeListenerToMap(
+       nsIHttpUpgradeListener* aListener);
+   static void RemoveHttpUpgradeListenerFromMap(uint32_t aId);
